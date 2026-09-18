@@ -42,6 +42,7 @@ int Usage() {
       "usage:\n"
       "  trackaccess solve    --data DIR --out DIR [--scenario A|B|C|all]\n"
       "                       [--seconds N] [--workers N] [--seed N] [--log] [--fallback]\n"
+      "                       [--strict-buffers]\n"
       "  trackaccess validate --data DIR --submission DIR\n"
       "  trackaccess diagnose --data DIR [--scenario A|B|C] [--seconds N]\n"
       "  trackaccess explain  --data DIR --activity ID --week N [--scenario A|B|C]\n"
@@ -81,6 +82,7 @@ int RunSolve(const std::vector<std::string>& args) {
   opts.random_seed = std::stoi(Arg(args, "--seed", "1"));
   opts.log_search = Flag(args, "--log");
   const bool fallback = Flag(args, "--fallback");
+  opts.strict_buffers = Flag(args, "--strict-buffers");
 
   std::cout << "instance " << data << "\n  activities=" << inst.activities.size()
             << " contracts=" << inst.contracts.size()

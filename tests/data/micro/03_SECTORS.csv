@@ -1,0 +1,5 @@
+sector_id,line_code,from_station_id,to_station_id,seq,is_shared
+SEC:ALP:S01_S02,ALP,S01,S02,1,0
+SEC:ALP:S02_S03,ALP,S02,S03,2,0
+SEC:ALP:S03_S04,ALP,S03,S04,3,0
+SEC:ALP:S04_S05,ALP,S04,S05,4,0

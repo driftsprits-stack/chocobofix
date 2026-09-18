@@ -190,9 +190,11 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   // Rule 4 / R6: pairs whose closure zones reach each other's worksite and which
   // share no location can never be proven to run on different nights, so they may
   // not share a week at all.
-  if (!(opts.relax & kRelaxBuffers))
-    for (const auto& [i, j] : inst.exclusive_pairs)
+  if (!(opts.relax & kRelaxBuffers)) {
+    const auto& pairs = opts.strict_buffers ? inst.exclusive_pairs_strict : inst.exclusive_pairs;
+    for (const auto& [i, j] : pairs)
       for (int w = 1; w <= H; ++w) m.AddAtMostOne({x[i][w], x[j][w]});
+  }
 
   // Rule 10: under Scenario C every ECLO night affecting a line must fall in one
   // continuous span of at most two calendar weeks, chosen per line. A cross-line

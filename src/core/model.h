@@ -147,10 +147,19 @@ struct Instance {
   std::unordered_map<std::string, ConIdx> contract_by_number;
   std::unordered_map<std::string, ActIdx> activity_by_id;
 
-  // Pairs (a,b), a<b, that may never share a week: their closure zones reach
-  // each other's worksite and they share no location, so nothing in the output
-  // schema could establish that they run on different nights (R6).
+  // Pairs (a,b), a<b, that may never share a week under the ADOPTED reading of
+  // rule 6: their zones reach each other's worksite and they share no location,
+  // so nothing in the output schema could establish that they run on different
+  // nights. See docs/DERIVED_RULES.md R6.
   std::vector<std::pair<ActIdx, ActIdx>> exclusive_pairs;
+
+  // The same set under the LITERAL reading of rule 6's second sentence
+  // ("buffers apply normally between them"), where sharing a location with a
+  // different co_share_group does not settle the pair. Strictly larger. Kept so
+  // the cost of that reading is measurable rather than argued about; selected by
+  // SolveOptions::strict_buffers. The shipped sample breaches this reading 50
+  // times, which is the evidence against it.
+  std::vector<std::pair<ActIdx, ActIdx>> exclusive_pairs_strict;
 
   // Activities occupying each location, for the per-location-week capacity rows.
   std::vector<std::vector<ActIdx>> activities_at;

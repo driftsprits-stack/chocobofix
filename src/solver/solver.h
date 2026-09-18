@@ -70,6 +70,11 @@ struct SolveOptions {
   // the instance is, rather than being handed nothing at all.
   bool soft_scenario_policy = false;
 
+  // Use the literal reading of rule 6 (see Instance::exclusive_pairs_strict).
+  // Costs score and may be unschedulable; provided so the cost of that reading
+  // can be measured rather than assumed.
+  bool strict_buffers = false;
+
   // Repair mode. When `baseline` is set, the search additionally prefers to keep
   // its assignments. This preference is NEVER part of the competition score:
   // SolveResult::score is always the scenario's own objective, recomputed from

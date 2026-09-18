@@ -2,18 +2,46 @@
 
 Upstream commit: `966c976005db2e3e40a691cff268fdb8f396a5df` (PS1, fetched 2026-09-18).
 
-**Method.** `PS1_README.md` leaves several rules under-specified. The pack ships
-`03_submission_sample/`, described upstream as "a feasible, 0-hard-violation
-submission against `01_data/`". Each candidate interpretation below was executed
-against that sample; an interpretation that reports the sample as *infeasible* is
-refuted. Scripts: `tools/derive/` (re-runnable).
+**Method.** `PS1_README.md` leaves several rules under-specified and, in one
+place, self-contradictory. The pack ships `03_submission_sample/`, described
+upstream as "a feasible, 0-hard-violation submission against `01_data/`". Each
+candidate interpretation below was executed against that sample; an interpretation
+that reports the sample as *infeasible* contradicts the brief's own claim about
+its own artefact. Scripts: `tools/derive/` (re-runnable).
 
 **The official reference validator is NOT in the upstream repository.** The brief
 references `python3 -m trackaccess expand`; no such module, script or archive
 exists anywhere in the repo tree (verified over the full recursive tree listing).
-Everything below is therefore *our reconstruction*, corroborated only by the
-sample. **No claim in this project may describe our checker's verdict as an
-official-validator result.**
+Everything below is therefore *our reconstruction*. **No claim in this project may
+describe our checker's verdict as an official-validator result.**
+
+## What the evidence here can and cannot establish
+
+This section exists because it is easy to overstate what we know.
+
+**Two checkers agreeing does not establish an interpretation.** This project has a
+C++ checker (`src/validator/`) and an independent Python one
+(`tools/derive/crosscheck.py`), written separately and sharing no code. Their
+agreement is evidence that **the rules are implemented faithfully in both** — it
+catches coding mistakes. It is *not* evidence that the rules are the right ones,
+because both encode the same reading. Wherever this document says two
+implementations agree, read it as implementation fidelity and nothing more.
+
+**Sample acceptance is supporting evidence, not proof.** That our reading accepts
+the shipped sample is consistent with being right; it does not exclude other
+readings that also accept it, and it rests on the organisers' claim that the
+sample is 0-violation, which we cannot verify without their validator. Where a
+reading is *refuted* by the sample the evidence is stronger — a reading that calls
+the organisers' own artefact infeasible is contradicted by the brief — but even
+that assumes the sample is current.
+
+**Status labels used below:**
+
+| Label | Meaning |
+| --- | --- |
+| **Settled** | The sample discriminates decisively, and no competing reading survives it. |
+| **Adopted, contested** | The brief is self-contradictory. A reading is chosen, the alternative is named, and the cost of being wrong is measured. |
+| **Open** | Not resolved. No artefact discriminates. |
 
 ---
 
@@ -69,53 +97,119 @@ finishing early report their true earlier date.
 Always a multiple of 7, so overrun is **linear in the last access week** — encoded
 directly in CP-SAT.
 
-## R6. Closure and buffer — RESOLVED against the sample, with a residual caveat
+## R6. Closure and buffer — two sub-rules, one **settled**, one **adopted, contested**
 
-Two distinct exclusions, which the brief describes in different language and which
-must not be conflated:
+### R6a — closure. Settled.
 
-**R6a — closure.** An activity's closure is its worksite, plus for `Live` the
-mirrored opposite bound (cutting traction power takes both bounds together) and,
-at the interchange only, the other line's `H01_H02` tunnel and its `H01`/`H02`
-platforms. §2.4 r4: "no external activity may enter it that night" — a closure
-excludes **every** other activity. The cross-line set is exactly the one the brief
-names and is not itself widened by any buffer.
+> "Occupied night maintenance work closes a sector; no external activity may enter
+> it that night. ... `Live` mirrors closure to opposite bound, and — only for
+> `Live` — also crosses onto the other line's `H01_H02` tunnel sector/platforms at
+> the interchange. Non-Live work never crosses lines there"
 
-**R6b — buffer.** The closure grown by `up_to_buffer_sectors`, counted in whole
-sectors along each (line, bound) chain the worksite touches. §2.4 r4 scopes its
-effect explicitly: a buffer "pushes the next **`Live`/`Non-Live(Consist)`** work on
-that bound". A buffer therefore constrains only other buffer-carrying work;
+An activity's closure is its worksite, plus for `Live` the mirrored opposite bound
+and, at the interchange only, the other line's `H01_H02` tunnel and its `H01`/`H02`
+platforms. A closure excludes **every** other activity. The cross-line set is
+exactly the one the brief names and is not itself widened by any buffer.
+
+Pinned by `tests/test_core.cpp` (`AX/AL` excluded under both readings; a Live
+closure reaches the opposite bound).
+
+### R6b — whom a buffer pushes. Settled.
+
+> "Buffers never overlap — a `Live`/`Non-Live(Consist)` work whose buffer reaches,
+> say, `S02` **pushes the next `Live`/`Non-Live(Consist)` work** on that bound to
+> start no earlier than `S03`."
+
+The sentence names what a buffer pushes: other `Live`/`Non-Live(Consist)` work.
 `Non-live (Others)`, which carries no buffer, is not pushed by anyone else's.
+Counterexample test: `AY` (Consist) and `AN` (Others) occupy adjacent ground and
+`AY`'s buffer reaches `AN`'s worksite, yet the pair is not excluded. A reading in
+which buffers bind on everyone would fail that test.
 
-Conflict test between two activities in the same week:
-- if `occupied(A) ∩ occupied(B) ≠ ∅` → **no conflict**. Their relationship at the
-  shared location is already settled by `co_share_group`: equal ⇒ one possession
-  (§2.4 r6 exempts them); different ⇒ provably different nights.
-- else conflict if `closure(A) ∩ occupied(B) ≠ ∅` or the reverse;
-- else, **only when both carry a buffer**, conflict if
-  `buffer_zone(A) ∩ occupied(B) ≠ ∅` or the reverse.
+Buffer distance is counted in whole **sectors** along the (line, bound) chain.
+Counting raw chain steps instead makes the sample infeasible 28 times.
 
-| Variant | Sample violations |
-| --- | --- |
-| **closure binds all, buffer binds only buffered pairs** (adopted) | **0** |
-| single buffered zone binding all pairs | 0 |
-| buffer counted in chain steps rather than sectors | 28 |
-| exemption requires a shared *slot label* rather than a shared location | 5 |
-| no exemption at all | 105 |
+### R6c — whether sharing a location settles a pair. **Adopted, contested.**
 
-The first two both accept the sample, but the adopted rule is strictly the more
-permissive of them and is the one the brief's wording actually describes, so it is
-preferred: it admits schedules the stricter reading would reject, without admitting
-anything the sample shows to be legal. On the public instance it reduces the
-never-same-week pair count from 62 to 58.
+This is the one genuinely unresolved interpretation in the project, and the brief
+contradicts itself on it. Rule 6 reads:
 
-**Caveat (unverifiable).** Where two activities share *no* location, nothing in the
-output schema establishes whether they run on the same night — `access_night` is a
-per-contract accounting index, not a network-wide night id. We take the
-conservative branch and treat them as potentially concurrent. If the official
-validator is *less* strict here we lose some score; no rule consistent with a
-feasible sample could be stricter. **Our solver is never less strict than the
-evidence allows.**
+> "Same `(location_id, week, co_share_group)` = one possession (one access-night
+> slot) — no buffers between them, exempt from each other's closures. Different
+> `co_share_group` values at the same location/week are **separate possessions on
+> separate nights** within that week's allocation, **and buffers apply normally
+> between them**."
+
+The two emphasised clauses cannot both bite. A buffer is a spatial exclusion *on a
+given night*; if two possessions are on separate nights by construction, there is
+nothing for a buffer between them to forbid. The sentence asserts both.
+
+| | Reading | Consequence |
+| --- | --- | --- |
+| **Adopted** | Sharing a location settles the pair: identical `co_share_group` means one possession (exempt by the first clause); a different one means provably different nights, so no spatial conflict arises. | Permissive |
+| **Literal** | The second clause is taken at face value: a buffer reaching a co-located activity's worksite is a breach even when the two share a location. | Restrictive |
+
+**Evidence against the literal reading.**
+
+1. It declares the organisers' own `03_submission_sample/` infeasible **24 times**,
+   contradicting the brief's explicit statement that the sample has 0 hard
+   violations. Reproduce with `python3 tools/derive/exposure.py`.
+2. It is schedulable, but its *proven optimum* on the public instance is worse
+   than the score the sample actually achieves:
+
+   | | Scenario A | B | C |
+   | --- | --- | --- | --- |
+   | adopted reading, our optimum | **32.2** | **30.0** | **26.1** |
+   | literal reading, our optimum | 93.8 | 70.0 | 87.7 |
+   | shipped sample (Scenario A) | 48.3 | — | — |
+
+   The sample scores 48.3, better than the best plan the literal reading permits
+   (93.8). A submission cannot outperform the optimum of the rules it obeys, so
+   the sample was not produced under the literal reading.
+
+That is strong, but it is not proof: it rests on the sample being current and on
+the organisers' 0-violation claim. Hence **contested**, not settled.
+
+**Our exposure if we are wrong.** Measured by `tools/derive/exposure.py`, which
+counts activity pairs where a zone reaches beyond its owner's own worksite into
+another activity's worksite in the same week:
+
+| Submission | breaches, adopted reading | breaches, literal reading |
+| --- | --- | --- |
+| shipped sample | 0 | 24 |
+| ours, Scenario A | 0 | 23 |
+| ours, Scenario B | 0 | 42 |
+| ours, Scenario C | 0 | 34 |
+| ours with `--strict-buffers`, A / B / C | 0 | **0 / 0 / 0** |
+
+**Two corrections, both withdrawing earlier claims.**
+
+1. An earlier draft asserted that "our solver is never less strict than the
+   evidence allows." That is **wrong and withdrawn**. Under the literal reading our
+   default outputs do contain breaches.
+2. A later draft reported the sample at 50 breaches and our outputs at 6 / 27 / 0,
+   and concluded our exposure was "strictly smaller than the reference sample's".
+   Those counts came from a measurement that wrongly treated any shared location as
+   a closure clash, when two activities at one location on different nights are
+   governed by capacity, not by the closure rule. **The corrected counts are above,
+   and the conclusion is withdrawn: our exposure is comparable to the sample's for
+   Scenario A and larger for B and C.** The tool is now in the repository so the
+   figure can be re-derived rather than trusted.
+
+What survives both corrections is the argument against the literal reading itself
+— which rests on the sample, not on us — and the fact that `--strict-buffers`
+produces plans with zero breaches under either reading.
+
+**The hedge.** `trackaccess solve --strict-buffers` enforces the literal reading,
+producing plans valid under **both**. It costs roughly 2.3×–3.4× on the objective.
+`out/public-strict/` holds those plans alongside the primary ones so the trade is
+visible rather than theoretical. Which to submit is a judgement call recorded in
+`DEBUG_HANDOFF.md`, not a decision this document makes.
+
+**What would settle it.** Running the official validator on the shipped sample. If
+it reports 0 violations, the literal reading is dead. If it reports ~50, the
+adopted reading is dead and `--strict-buffers` becomes the default. Nothing short
+of that resolves it.
 
 ## R7. Scoring — per-activity, not per-contract — PARTIALLY RESOLVED
 

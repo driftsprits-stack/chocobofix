@@ -1,0 +1,7 @@
+contract_number,contract_description,contract_award_date,activity_type,nature_of_activity,contract_priority,contract_completion_date,planned_completion_date,number_of_workfronts,access_type,number_of_maximum_access_per_week
+C01,X consist,2026-10-01,Renewal,Non-live (Consist),3,2027-02-28,2027-02-28,2,C,3
+C02,Y consist,2026-10-01,Renewal,Non-live (Consist),3,2027-02-28,2027-02-28,2,C,3
+C03,Z consist,2026-10-01,Renewal,Non-live (Consist),3,2027-02-28,2027-02-28,2,C,3
+C04,L live,2026-10-01,Renewal,Live,3,2027-02-28,2027-02-28,1,PC,2
+C05,M consist,2026-10-01,Renewal,Non-live (Consist),3,2027-02-28,2027-02-28,2,C,3
+C06,N others,2026-10-01,Construction,Non-live (Others),3,2027-02-28,2027-02-28,2,C,3

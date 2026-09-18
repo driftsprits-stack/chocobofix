@@ -129,6 +129,17 @@ d=json.load(open('$TMP/tb2/B/VALIDATION.json'))
 print(','.join(sorted({v['rule'] for v in d['hard_violations']})))")
 chk "$rules" "planned_date" "  ... and the ONLY breaches are the scenario policy, not any safety rule"
 
+echo "== rule-6 exposure is measured, not assumed =="
+out=$(python3 tools/derive/exposure.py data/upstream/PS1/01_data data/upstream/PS1/03_submission_sample 2>&1)
+echo "$out" | grep -qE "adopted: +0" && ok "the shipped sample has 0 breaches under the adopted reading" \
+  || no "sample exposure under the adopted reading: $out"
+echo "$out" | grep -qE "literal: +[1-9]" && ok "  ... and a non-zero count under the literal reading, which refutes it" \
+  || no "sample exposure under the literal reading"
+"$BUILD/trackaccess" solve --data "$DATA" --out "$TMP/strict" --scenario A --seconds 45 --strict-buffers >/dev/null 2>&1
+out=$(python3 tools/derive/exposure.py "$DATA" "$TMP/strict/A" 2>&1)
+echo "$out" | grep -qE "adopted: +0 +literal: +0" && ok "--strict-buffers output has 0 breaches under BOTH readings" \
+  || no "--strict-buffers exposure: $out"
+
 echo "== service: start with token auth =="
 TOKEN=testtoken0123456789abcdef
 "$BUILD/trackaccess-service" --host 127.0.0.1 --port "$PORT" --root "$TMP/var" --web web \

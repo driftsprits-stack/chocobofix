@@ -169,6 +169,78 @@ int main() {
     Check(has_other_line, "a Live closure at the interchange crosses to the other line");
   }
 
+  // ------------------------------------------------- interpretation counterexamples
+  // A hand-built micro network (tests/data/micro) whose only purpose is to make
+  // the competing readings of rule 6 disagree on a NAMED pair, so the choice is
+  // pinned by a test rather than by prose. See docs/DERIVED_RULES.md R6.
+  Group("rule 6 counterexamples");
+  {
+    Instance micro;
+    std::vector<InputError> merr;
+    Check(LoadInstance("tests/data/micro", &micro, &merr), "the micro instance loads");
+    auto idx = [&](const char* id) { return micro.activity_by_id.at(id); };
+    auto pair_in = [&](const std::vector<std::pair<ActIdx, ActIdx>>& v, const char* a, const char* b) {
+      ActIdx i = idx(a), j = idx(b);
+      if (i > j) std::swap(i, j);
+      return std::find(v.begin(), v.end(), std::make_pair(i, j)) != v.end();
+    };
+
+    // THE DIVERGING CASE. AX (Consist, S01_S02..S02_S03 EB) and AY (Consist,
+    // S03_S04 EB) both book PLAT:ALP:S03:EB. AX's buffer reaches
+    // SEC:ALP:S03_S04:EB, which is AY's worksite.
+    //   adopted reading - they share a location, so the pair is settled by
+    //     co_share_group and they MAY share a week;
+    //   literal reading - rule 6's "buffers apply normally between them" makes
+    //     it a breach, so they may NOT.
+    // If this assertion ever flips, the project has silently changed its
+    // interpretation of the brief.
+    Check(!pair_in(micro.exclusive_pairs, "AX", "AY"),
+          "adopted reading: AX and AY may share a week (they share PLAT:ALP:S03:EB)");
+    Check(pair_in(micro.exclusive_pairs_strict, "AX", "AY"),
+          "literal reading: AX and AY may NOT share a week (AX's buffer reaches AY)");
+
+    // A second diverging pair in the opposite direction: AM's buffer reaches
+    // into AX's worksite, and they share three locations.
+    Check(!pair_in(micro.exclusive_pairs, "AX", "AM"), "adopted: AX and AM may share a week");
+    Check(pair_in(micro.exclusive_pairs_strict, "AX", "AM"), "literal: AX and AM may not");
+
+    // WHERE THE READINGS AGREE - these must hold under either, so they guard the
+    // parts of the rule that are not in dispute.
+    Check(pair_in(micro.exclusive_pairs, "AX", "AL") &&
+          pair_in(micro.exclusive_pairs_strict, "AX", "AL"),
+          "both readings: a Live closure mirrored onto the other bound excludes AX");
+    Check(!pair_in(micro.exclusive_pairs, "AX", "AZ") &&
+          !pair_in(micro.exclusive_pairs_strict, "AX", "AZ"),
+          "both readings: AX and AZ never interact, so neither excludes them");
+
+    // R6b: a buffer pushes only other buffer-carrying work. AN is
+    // Non-live (Others) and carries none, so AY's buffer must not push it.
+    // Under a reading where buffers bind on everyone, this pair would appear.
+    Check(!pair_in(micro.exclusive_pairs, "AY", "AN"),
+          "a buffer does not push Non-live (Others) work (R6b)");
+    Check(!pair_in(micro.exclusive_pairs_strict, "AY", "AN"),
+          "  ... and that holds under the literal reading too");
+    Check(micro.activities[idx("AN")].buffer_zone.size() ==
+          micro.activities[idx("AN")].occupied.size(),
+          "Non-live (Others) has no zone beyond its own worksite");
+
+    // The literal reading is strictly stronger: every adopted exclusion is also
+    // a literal one. If this ever fails the two sets have drifted apart.
+    bool superset = true;
+    for (const auto& pr : micro.exclusive_pairs)
+      if (std::find(micro.exclusive_pairs_strict.begin(), micro.exclusive_pairs_strict.end(), pr) ==
+          micro.exclusive_pairs_strict.end()) superset = false;
+    Check(superset, "the literal exclusion set contains the adopted one");
+    Check(micro.exclusive_pairs_strict.size() > micro.exclusive_pairs.size(),
+          "and is strictly larger on this instance, so the readings really do differ");
+
+    // Live specifics, which no reading disputes.
+    const auto& AL = micro.activities[idx("AL")];
+    bool crosses_bound = false;
+    for (LocIdx l : AL.closure) if (micro.locations[l].bound == Bound::kEB) crosses_bound = true;
+    Check(crosses_bound, "a Live closure reaches the opposite bound");
+  }
+
   // ---------------------------------------------------------------- the sample
   Group("sample corroboration");
   Plan sample;

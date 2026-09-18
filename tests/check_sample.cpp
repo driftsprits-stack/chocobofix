@@ -22,7 +22,8 @@ int main(int argc, char** argv) {
             << inst.contracts.size() << " contracts, " << inst.locations.size()
             << " locations, " << inst.horizon_weeks << " weeks\n"
             << "input_hash: " << inst.input_hash << "\n"
-            << "exclusive pairs (buffer-conflicting): " << inst.exclusive_pairs.size() << "\n";
+            << "never-same-week pairs, adopted reading: " << inst.exclusive_pairs.size() << "\n"
+            << "never-same-week pairs, literal reading: " << inst.exclusive_pairs_strict.size() << "\n";
 
   ta::Plan plan;
   errors.clear();

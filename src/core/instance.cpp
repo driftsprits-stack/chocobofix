@@ -301,13 +301,38 @@ bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
     for (int j = i + 1; j < n; ++j) {
       const auto& A = inst->activities[i];
       const auto& B = inst->activities[j];
-      if (intersects(A.occupied, B.occupied)) continue;  // settled by co_share_group
-      // A closure excludes any other activity from the locations it closes.
+      // A closure excludes any other activity from the locations it closes; a
+      // buffer only pushes other buffer-carrying work (docs R6a / R6b).
       bool clash = intersects(A.closure, B.occupied) || intersects(B.closure, A.occupied);
-      // A buffer only pushes other buffer-carrying work (see docs R6b).
       if (!clash && A.carries_buffer && B.carries_buffer)
         clash = intersects(A.buffer_zone, B.occupied) || intersects(B.buffer_zone, A.occupied);
-      if (clash) inst->exclusive_pairs.emplace_back(i, j);
+      if (!clash) continue;
+
+      // Literal reading: a zone reaching into the other's worksite is a breach
+      // even when the two share a location, because rule 6 exempts only an
+      // identical (location, week, co_share_group).
+      const bool shares_location = intersects(A.occupied, B.occupied);
+      {
+        // Only the part of a zone OUTSIDE the owner's own worksite can intrude;
+        // overlapping worksites are governed by capacity and the legal mix.
+        auto beyond = [&](const std::vector<LocIdx>& zone, const std::vector<LocIdx>& own,
+                          const std::vector<LocIdx>& other) {
+          for (LocIdx l : zone) {
+            if (std::binary_search(own.begin(), own.end(), l)) continue;
+            if (std::binary_search(other.begin(), other.end(), l)) return true;
+          }
+          return false;
+        };
+        bool strict = beyond(A.closure, A.occupied, B.occupied) ||
+                      beyond(B.closure, B.occupied, A.occupied);
+        if (!strict && A.carries_buffer && B.carries_buffer)
+          strict = beyond(A.buffer_zone, A.occupied, B.occupied) ||
+                   beyond(B.buffer_zone, B.occupied, A.occupied);
+        if (strict) inst->exclusive_pairs_strict.emplace_back(i, j);
+      }
+      // Adopted reading: sharing a location settles the pair (identical group =
+      // one possession; different group = provably different nights).
+      if (!shares_location) inst->exclusive_pairs.emplace_back(i, j);
     }
   return true;
 }

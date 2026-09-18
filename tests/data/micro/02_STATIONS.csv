@@ -1,0 +1,6 @@
+station_id,line_code,seq,is_interchange
+S01,ALP,1,0
+S02,ALP,2,0
+S03,ALP,3,0
+S04,ALP,4,0
+S05,ALP,5,0
