@@ -20,7 +20,7 @@ in memory.
 | Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
 | Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
 | Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 74 unit + 46 integration/security, ASan+UBSan clean |
+| Tests | 77 unit + 57 integration/security, ASan+UBSan clean |
 | Hosted deployment | **not deployed** — see [Deployment](#deployment). No URL exists yet. |
 | Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
 
@@ -80,6 +80,48 @@ best complete plan already found.
 Exit codes: `0` success · `1` usage or input error · `2` no plan produced ·
 `3` the plan failed the independent check.
 
+## Explain, repair, compare
+
+**Why not earlier?** — test whether an activity could take an access in a given
+week, and if not, which rule stands in the way:
+
+```bash
+./build/trackaccess explain --data data/upstream/PS1/01_data \
+  --activity A004 --week 16 --scenario A
+```
+
+It answers one of three things, and never confuses them: *yes* (with the cascade
+it causes and its cost), *proven impossible* (naming the binding rule), or *not
+established within the budget* — which is not evidence of impossibility.
+
+**Disruption repair** — urgent maintenance takes nights away from a location;
+re-plan around it while keeping unaffected commitments:
+
+```bash
+./build/trackaccess repair --data data/upstream/PS1/01_data --out out/repaired \
+  --supply "SEC:BET:H01_H02:EB@15=0" --supply "SEC:BET:H01_H02:EB@16=0" \
+  --scenario A
+```
+
+Reports the objective before and after, how many activity-weeks moved, and which
+activities changed. The minimal-change preference is a tie-break only: it is
+**never** part of the competition objective, and the score reported afterwards is
+recomputed from the written plan without it.
+
+**Before/after** — diff two exported submissions:
+
+```bash
+./build/trackaccess compare --data data/upstream/PS1/01_data \
+  --before out/public/A --after out/repaired
+```
+
+**Diagnose an infeasible instance** — lift one rule group at a time to find which
+one binds:
+
+```bash
+./build/trackaccess diagnose --data <instance> --scenario A
+```
+
 ## Check a submission
 
 ```bash
@@ -119,9 +161,12 @@ Judging / shared deployment (no token, put TLS in front — see Deployment):
 ```
 
 Workflow in the interface: **Import → Generate → Schedule → Network → Check →
-Export**. Drop the eight CSVs (or press *Load public instance*), pick a scenario,
+Repair → Export**. Drop the eight CSVs (or press *Load public instance*), pick a scenario,
 generate, then inspect the timeline, the network occupancy per week, the
-conformance report, and download the competition files.
+conformance report, and download the competition files. Selecting an activity
+shows the locations it books and its buffer, and offers "why not another week?"
+for any week you name. The Repair tab applies a disruption and shows what it
+costs before you accept it.
 
 Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Text size is
 adjustable from the header. Every control is keyboard reachable; there is no
@@ -130,9 +175,9 @@ drag-only interaction.
 ## Tests
 
 ```bash
-./build/test_core              # 74 unit, mutation and metamorphic checks
+./build/test_core              # 77 unit, mutation and metamorphic checks
 ./build/check_sample           # our checker must accept the upstream sample
-./tests/integration.sh build   # 46 end-to-end, API and security checks
+./tests/integration.sh build   # 57 end-to-end, API and security checks
 ctest --test-dir build         # runs the first two under CTest
 ```
 

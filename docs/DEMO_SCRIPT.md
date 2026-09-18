@@ -69,7 +69,21 @@ Check tab.
 Mention the corroboration: the same checker accepts the organisers' own sample
 submission as feasible, and scores it 48.3 where our Scenario A scores 32.2.
 
-### 2:20–2:45 · Export, and the honest failure modes
+### 2:20–2:40 · The consequence of a decision, before committing
+
+Repair tab. Close `SEC:BET:H01_H02:EB` — the Beta interchange tunnel — for weeks
+15 and 16, as if urgent maintenance had taken it.
+
+> Nine point one more penalty, a week more overrun, five activities moved. That is
+> what this disruption costs, and a controller sees it before accepting it. The
+> unaffected work stays where it was.
+
+Then, on an activity: ask why it cannot run a week earlier.
+
+> Proven impossible — and it names the rule: its predecessor has not finished.
+> Not a guess, and not a timeout dressed up as a no.
+
+### 2:40–2:50 · Export, and the honest failure modes
 
 Export tab, download the three files.
 
@@ -85,7 +99,7 @@ trackaccess diagnose --data <dense-instance> --scenario A
 > it never reports a timeout as impossibility. Those are different answers and a
 > controller needs to know which one they have.
 
-### 2:45–3:00 · Close
+### 2:50–3:00 · Close
 
 > Four languages, keyboard throughout, no cloud dependency — it runs with the
 > network cable out. A planner sees the consequences of a decision before

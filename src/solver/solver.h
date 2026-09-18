@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <utility>
+#include <vector>
 #include <functional>
 #include <string>
 
@@ -36,12 +38,35 @@ enum Relax : unsigned {
 };
 const char* RelaxName(unsigned bit);
 
+// A disruption expressed in the input's own semantics: the supply available at
+// one location in one week is overridden. Used for "urgent maintenance has taken
+// two of the four nights at S01-S02 in week 12".
+struct SupplyOverride {
+  LocIdx location = kNoIndex;
+  Week week = 0;
+  int supply = 0;
+};
+
 struct SolveOptions {
   Scenario scenario = Scenario::kA;
   unsigned relax = kRelaxNone;
   double max_seconds = 60.0;
   int workers = 8;
   int random_seed = 1;
+
+  // Hypotheses under test. `require` forces an access, `forbid` removes one.
+  std::vector<std::pair<ActIdx, Week>> require;
+  std::vector<std::pair<ActIdx, Week>> forbid;
+
+  // Disruption: per location-week supply replacing LOCATION_SUPPLY.
+  std::vector<SupplyOverride> supply_overrides;
+
+  // Repair mode. When `baseline` is set, the search additionally prefers to keep
+  // its assignments. This preference is NEVER part of the competition score:
+  // SolveResult::score is always the scenario's own objective, recomputed from
+  // the plan, and `churn` is reported separately.
+  const Plan* baseline = nullptr;
+  int churn_weight_tenths = 0;
   // Scenario C allows at most one excess access-night per location-week; B is
   // unbounded (scored, not failed); A permits none.
   bool log_search = false;
@@ -52,8 +77,10 @@ struct SolveResult {
   Plan plan;
   Score score;
   double wall_seconds = 0;
-  long long objective_tenths = 0;
+  long long objective_tenths = 0;    // the scenario's competition objective
+  long long search_objective_tenths = 0;  // what CP-SAT minimised (may include churn)
   long long best_bound_tenths = 0;   // meaningful only when a solution exists
+  int churn = 0;                     // activity-weeks differing from the baseline
   std::string solver_detail;         // CP-SAT status name and counters
   std::string message;
 };

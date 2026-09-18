@@ -42,6 +42,8 @@ Evidence column names the test or artefact that demonstrates it.
 | B — strict planned dates | Implemented | feasible, **proven optimal**, objective 30.0, zero overrun |
 | C — balanced, ≤1 excess night per location-week | Implemented | feasible, **proven optimal**, objective 26.1 |
 | Distinct outcome states (optimal / feasible / infeasible / timeout / cancelled / invalid input / internal error) | Implemented | `SolveStatus`; a timeout is never reported as infeasibility |
+| Infeasibility attribution | Implemented | `trackaccess diagnose` lifts one rule group at a time and names which binds |
+| No strictly redundant access-night | Implemented | the solver forbids an access that could be dropped while still meeting the workload, so no plan squats on a possession slot it does not need |
 
 ## Product and interface (§5)
 
@@ -56,10 +58,11 @@ Evidence column names the test or artefact that demonstrates it.
 | Independent validation in the UI | Implemented | Check tab, with the not-the-official-validator caveat on screen |
 | Export competition files | Implemented | Export tab; bytes served are the bytes validated |
 | Keyboard alternatives, visible focus, scalable text | Implemented | no drag-only interaction; table rows are focusable |
-| **Disruption repair** | **Not implemented** | — |
-| **"Why not earlier?"** | **Not implemented** | — |
-| **Before/after comparison** | **Not implemented** | — |
-| **What-if tests** | **Not implemented** | — |
+| **Disruption repair** | **Implemented** | `trackaccess repair`, and the Repair tab. Supply is changed in the input's own semantics; the re-plan keeps unaffected commitments and reports churn. Covered by `tests/integration.sh`. |
+| **"Why not earlier?"** | **Implemented** | `trackaccess explain`, and the activity detail panel. Answers yes / proven-impossible / not-established, never collapsing the last two. Three integration checks, including that a one-second budget does not produce a bare "no". |
+| **Before/after comparison** | **Implemented** | `trackaccess compare`, and the repair output, which diffs activity weeks and the objective. |
+| **What-if tests** | **Partial** | Reduced access is supported (it is the same mechanism as repair). Increased workload and reduced workfront availability are **not** exposed. |
+| Repair preference kept out of the competition score | **Implemented** | The churn term is a solver tie-break only; `SolveResult::objective_tenths` is recomputed from the plan. Asserted in `tests/integration.sh`. |
 | Four languages | Partial | All strings ship in en/ms/zh/ta. **ms, zh and ta are unreviewed by a fluent speaker** and are marked as such in `web/i18n.js`. Tamil and Chinese rendering depends on system fonts; not tested across platforms. |
 
 ## Reliability and multi-user (§7)
@@ -108,7 +111,7 @@ Evidence column names the test or artefact that demonstrates it.
 | Mutation tests the checker must reject | Implemented | 9 mutations, each breaking one rule |
 | Metamorphic tests | Partial | Row-order invariance implemented. **ID relabelling invariance is not implemented.** |
 | Official-validator comparison | **Impossible** | The reference validator is not published in the problem repository. Corroboration is against the shipped sample instead, and every report says so. |
-| Integration / end-to-end | Implemented | 46 checks in `tests/integration.sh` |
+| Integration / end-to-end | Implemented | 57 checks in `tests/integration.sh` |
 | Security tests | Implemented | auth, traversal, filename restriction, unknown ids |
 | Concurrency / approval races | Not implemented | No approvals exist to race. |
 | Load and stress | Partial | Measured on the public instance and on synthetic multiples; see `docs/TEST_REPORT.md` |

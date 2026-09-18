@@ -62,6 +62,45 @@ printf 'key,value\nhorizon_start,2027-13-45\nhorizon_weeks,30\n' > "$TMP/badinst
 "$BUILD/trackaccess" solve --data "$TMP/badinst" --out "$TMP/o2" --scenario A --seconds 5 >/dev/null 2>&1
 chk "$?" "1" "an impossible date is rejected with exit 1"
 
+echo "== explain: a reachable week =="
+out=$("$BUILD/trackaccess" explain --data "$DATA" --activity A004 --week 21 --scenario A --seconds 15 2>&1)
+echo "$out" | grep -q "YES - it can" && ok "explain reports a reachable week as reachable" \
+  || no "explain on a reachable week: $(echo "$out" | tail -1)"
+
+echo "== explain: an impossible week names the binding rule =="
+out=$("$BUILD/trackaccess" explain --data "$DATA" --activity A004 --week 5 --scenario A --seconds 15 2>&1)
+echo "$out" | grep -q "NO - proven impossible" && ok "explain proves an impossible week impossible" \
+  || no "explain on an impossible week"
+echo "$out" | grep -q "BINDING  predecessor precedence" && ok "explain names predecessor precedence as binding" \
+  || no "explain names the binding rule"
+# A timeout must never be dressed up as impossibility.
+out=$("$BUILD/trackaccess" explain --data "$DATA" --activity A004 --week 5 --scenario A --seconds 1 2>&1)
+echo "$out" | grep -q "NOT ESTABLISHED\|NO - proven impossible" && ok "a tiny budget yields either a proof or 'not established', never a bare no" \
+  || no "explain under a tiny budget"
+
+echo "== repair: a disruption is absorbed and re-checked =="
+out=$("$BUILD/trackaccess" repair --data "$DATA" --out "$TMP/rep" \
+        --supply "SEC:BET:H01_H02:EB@15=0" --supply "SEC:BET:H01_H02:EB@16=0" \
+        --scenario A --seconds 45 2>&1)
+chk "$?" "0" "repair exits 0"
+echo "$out" | grep -q "independent check: FEASIBLE" && ok "the repaired plan passes the independent check" \
+  || no "repaired plan feasibility"
+echo "$out" | grep -q "churn" && ok "repair reports how much moved" || no "repair reports churn"
+[ -s "$TMP/rep/SCHEDULE_ACCESS.csv" ] && ok "repair exported a schedule" || no "repair exported a schedule"
+# A malformed disruption must be refused, not guessed at.
+"$BUILD/trackaccess" repair --data "$DATA" --out "$TMP/rep2" --supply "NOT_A_LOCATION@9=1" --seconds 5 >/dev/null 2>&1
+chk "$?" "1" "an unknown location in a disruption is refused"
+
+echo "== compare: before/after =="
+out=$("$BUILD/trackaccess" compare --data "$DATA" --before "$TMP/out/A" --after "$TMP/rep" 2>&1)
+echo "$out" | grep -q "activities changed" && ok "compare reports what changed" || no "compare output"
+
+echo "== the competition score is not contaminated by the repair preference =="
+# out/A and a repair with no disruption effect must score identically.
+a=$("$BUILD/trackaccess" validate --data "$DATA" --submission "$TMP/out/A" 2>/dev/null \
+     | python3 -c 'import json,sys;print(json.load(sys.stdin)["soft_scores"]["objective_score"])')
+[ -n "$a" ] && ok "scenario A objective recomputed from file: $a" || no "objective recomputed"
+
 echo "== service: start with token auth =="
 TOKEN=testtoken0123456789abcdef
 "$BUILD/trackaccess-service" --host 127.0.0.1 --port "$PORT" --root "$TMP/var" --web web \

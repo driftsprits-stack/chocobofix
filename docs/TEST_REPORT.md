@@ -20,7 +20,7 @@ estimated or carried over from a previous run.
 | --- | --- | --- |
 | Unit / mutation / metamorphic | `./build/test_core` | **77 passed, 0 failed** |
 | Sample corroboration | `./build/check_sample` | **sample accepted, 0 hard violations** |
-| Integration / API / security | `./tests/integration.sh build` | **46 passed, 0 failed** |
+| Integration / API / security | `./tests/integration.sh build` | **57 passed, 0 failed** |
 | ASan + UBSan | `./build-asan/test_core`, `./build-asan/check_sample` | **clean, no reports** |
 
 The mutation group is the load-bearing part: nine deliberately broken schedules,
@@ -120,6 +120,22 @@ Note what this rules out: lifting our **closure/buffer** interpretation alone do
 `docs/DERIVED_RULES.md` R6 is therefore not what limits density on these
 instances — location capacity interacting with planned start weeks is.
 
+## 4a. Explain, repair and compare
+
+| Check | Result |
+| --- | --- |
+| `explain A004 --week 21` (reachable) | **YES**, objective unchanged at 32.2, 1 activity-week moved |
+| `explain A004 --week 16` (reachable, cascading) | **YES**, objective unchanged, 6 activity-weeks moved across A003, A004, A007 |
+| `explain A004 --week 5` (impossible) | **proven impossible**; binding rule identified as predecessor precedence |
+| `explain` with a 1 s budget | reports **not established**, never a bare "no" |
+| `repair` closing `SEC:BET:H01_H02:EB` in weeks 15–16 | objective 32.2 → **41.3** (+9.1), overrun 28 → 35 d, 14 activity-weeks churn, repaired plan **feasible** |
+| Unknown location in a disruption | refused, exit 1 |
+| Competition objective after a repair | recomputed from the written plan; the churn preference does not enter it |
+
+The cascade in the second row is the point of the feature: moving A004 into week
+16 requires A003 to finish by week 15, which in turn displaces A007. The tool
+shows that before anything is committed.
+
 ## 5. Service behaviour
 
 | Measurement | Result |
@@ -164,5 +180,7 @@ All in `tests/integration.sh`:
 - **Tamil and Chinese glyph rendering was not verified** beyond the development
   machine's font set.
 - The worker-crash test kills the worker while the public instance solves in
-  under a second, so the kill often lands after the solve completes. The service's
-  survival is verified; the mid-solve kill path is only weakly exercised.
+  under a second, so the kill sometimes lands after the solve has completed. The
+  test accepts either outcome and always asserts the service survives. On the
+  final run the kill did land mid-solve and the job was correctly reported
+  `failed`, but this is timing-dependent rather than deterministic.

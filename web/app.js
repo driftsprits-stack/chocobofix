@@ -83,12 +83,13 @@ $('#sizeSel').addEventListener('change', e => {
 
 function showTab(name) {
   $$('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  ['import','solve','schedule','network','check','export']
+  ['import','solve','schedule','network','check','repair','export']
     .forEach(t => $('#p-' + t).classList.toggle('hide', t !== name));
   if (name === 'network') drawNetwork();
+  if (name === 'repair') fillRepairLocations();
 }
 $$('#tabs button').forEach(b => b.addEventListener('click', () => { if (!b.disabled) showTab(b.dataset.tab); }));
-const enableTabs = on => ['solve','schedule','network','check','export']
+const enableTabs = on => ['solve','schedule','network','check','repair','export']
   .forEach(t => { $(`#tabs button[data-tab="${t}"]`).disabled = !on; });
 
 // ---------------------------------------------------------------- 1 import
@@ -361,13 +362,73 @@ function showActivity(a, rows) {
   const ul = el('div', { class: 'note', style: 'font-family:ui-monospace,Menlo,monospace;font-size:.78rem' });
   ul.textContent = a.occupied.join('  ');
   d.append(ul);
+  // "Why not earlier?" - ask the service to test one alternative placement.
+  const whyWrap = el('div', { style: 'margin-top:10px;border-top:1px solid var(--rule-soft);padding-top:8px' });
+  const wkIn = el('input', { type: 'number', min: '1', max: String(S.detail.summary.horizon_weeks),
+                             value: String(Math.max(1, a.earliest_week)), style: 'width:64px' });
+  const whyOut = el('pre', { class: 'log', style: 'max-height:200px;margin-top:6px' });
+  whyOut.hidden = true;
+  const askBtn = el('button', { class: 'btn', text: T('why_ask'), onclick: async () => {
+    whyOut.hidden = false;
+    whyOut.textContent = '…';
+    const q = new URLSearchParams({ activity: a.id, week: wkIn.value,
+                                    scenario: S.current || 'A', seconds: '15' });
+    try {
+      const r = await api(`/api/v1/instances/${S.instanceId}/explain?` + q.toString(), { method: 'POST' });
+      whyOut.textContent = r.output || '(no output)';
+    } catch (e) { whyOut.textContent = 'failed: ' + e.message; }
+  } });
+  whyWrap.append(el('h3', { text: T('why_title'), style: 'font-size:.85rem' }),
+                 el('div', { class: 'row', style: 'margin-top:4px' },
+                    el('label', { text: T('why_week') }), wkIn, askBtn),
+                 el('p', { class: 'note', text: T('why_help') }), whyOut);
+
   const extra = a.closure.filter(x => !a.occupied.includes(x));
   if (extra.length) {
     d.append(el('h3', { text: 'Additionally closed by its buffer', style: 'margin-top:8px;font-size:.85rem' }));
     d.append(el('div', { class: 'note', style: 'font-family:ui-monospace,Menlo,monospace;font-size:.78rem', text: extra.join('  ') }));
   }
+  d.append(whyWrap);
   drawNetwork();
 }
+
+// ---------------------------------------------------------------- 6 repair
+const REP = [];
+function fillRepairLocations() {
+  const sel = $('#repLoc');
+  if (sel.options.length || !S.detail) return;
+  S.detail.locations.forEach(L =>
+    sel.append(el('option', { value: L.id, text: `${L.id}  (supply ${L.supply})` })));
+  $('#repFrom').max = $('#repTo').max = S.detail.summary.horizon_weeks;
+}
+function renderRepList() {
+  const box = $('#repList'); box.textContent = '';
+  REP.forEach((r, i) => box.append(el('div', {},
+    el('span', { text: `${r.loc}  wk ${r.from}–${r.to}  →  ${r.sup} nights` }),
+    el('button', { class: 'btn', text: '×', style: 'padding:0 8px',
+                   onclick: () => { REP.splice(i, 1); renderRepList(); } }))));
+  $('#repRun').disabled = REP.length === 0;
+}
+$('#repAdd').addEventListener('click', () => {
+  const from = Math.max(1, +$('#repFrom').value), to = Math.max(from, +$('#repTo').value);
+  REP.push({ loc: $('#repLoc').value, from, to, sup: Math.max(0, +$('#repSup').value) });
+  renderRepList();
+});
+$('#repClear').addEventListener('click', () => { REP.length = 0; renderRepList(); $('#repOut').textContent = ''; });
+$('#repRun').addEventListener('click', async () => {
+  const q = new URLSearchParams({ scenario: S.current || 'A', seconds: '45' });
+  REP.forEach(r => { for (let w = r.from; w <= r.to; w++) q.append('supply', `${r.loc}@${w}=${r.sup}`); });
+  $('#repChip').innerHTML = '<span class="chip idle">re-planning…</span>';
+  $('#repOut').textContent = '';
+  try {
+    const r = await api(`/api/v1/instances/${S.instanceId}/repair?` + q.toString(), { method: 'POST' });
+    $('#repOut').textContent = r.output || '(no output)';
+    const ok = r.exit === 0;
+    $('#repChip').innerHTML = `<span class="chip ${ok ? 'ok' : 'bad'}">${ok ? 'repaired' : 'not repairable'}</span>`;
+  } catch (e) {
+    $('#repChip').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`;
+  }
+});
 
 // ---------------------------------------------------------------- network schematic
 $('#wk').addEventListener('input', drawNetwork);

@@ -210,6 +210,44 @@ int RunWorker(const std::shared_ptr<Job>& job) {
   return -2;   // killed by a signal: crash or cancellation
 }
 
+// Runs the worker synchronously for the short, interactive analyses (explain /
+// repair) and returns its captured output. Same process isolation and rlimits as
+// a solve; bounded by `seconds` so a request cannot occupy a thread indefinitely.
+int RunWorkerSync(const std::vector<std::string>& argv_s, double seconds, std::string* output) {
+  int pipefd[2];
+  if (::pipe(pipefd) != 0) return -1;
+  std::vector<char*> argv;
+  for (auto& a : argv_s) argv.push_back(const_cast<char*>(a.c_str()));
+  argv.push_back(nullptr);
+
+  const pid_t pid = ::fork();
+  if (pid < 0) { ::close(pipefd[0]); ::close(pipefd[1]); return -1; }
+  if (pid == 0) {
+    ::close(pipefd[0]);
+    ::dup2(pipefd[1], STDOUT_FILENO);
+    ::dup2(pipefd[1], STDERR_FILENO);
+    ::close(pipefd[1]);
+    rlimit rl{};
+    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(g_cfg.worker_memory_mb) * 1024 * 1024;
+    ::setrlimit(RLIMIT_AS, &rl);
+    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(seconds * 8 + 60);
+    ::setrlimit(RLIMIT_CPU, &rl);
+    ::execv(g_cfg.worker.c_str(), argv.data());
+    ::_exit(127);
+  }
+  ::close(pipefd[1]);
+  char buf[4096];
+  ssize_t n;
+  while ((n = ::read(pipefd[0], buf, sizeof buf)) > 0) {
+    output->append(buf, static_cast<size_t>(n));
+    if (output->size() > 1u << 20) break;    // bound the reply
+  }
+  ::close(pipefd[0]);
+  int status = 0;
+  ::waitpid(pid, &status, 0);
+  return WIFEXITED(status) ? WEXITSTATUS(status) : -2;
+}
+
 void WorkerLoop() {
   for (;;) {
     std::string id;
@@ -558,6 +596,82 @@ int main(int argc, char** argv) {
     std::ostringstream os;
     os << "{" << Q("instance_id") << ":" << Q(id) << "," << Q("accepted") << ":true,"
        << Q("bundled") << ":true," << Q("summary") << ":" << SummariseInstance(inst) << "}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  // "Why not earlier?" for one activity and week. Answers yes (with the cascade
+  // it causes), proven no (with the binding rule), or not established.
+  srv.Post(R"(/api/v1/instances/([a-z0-9]+)/explain)",
+           [](const httplib::Request& req, httplib::Response& res) {
+    if (!Authorised(req)) return Deny(res, 401, "authentication required");
+    const std::string id = req.matches[1];
+    if (!SafeId(id) || !fs::exists(InstanceDir(id))) return Deny(res, 404, "unknown instance");
+    const std::string act = req.get_param_value("activity");
+    const std::string week = req.get_param_value("week");
+    std::string scen = req.get_param_value("scenario");
+    if (scen.empty()) scen = "A";
+    if (act.empty() || week.empty()) return Deny(res, 400, "activity and week are required");
+    // Values reach execv as an argument vector, never a shell; still, reject
+    // anything that is not the shape we expect before spending a process on it.
+    auto plain = [](const std::string& v, size_t max) {
+      if (v.empty() || v.size() > max) return false;
+      for (char c : v) if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') return false;
+      return true;
+    };
+    if (!plain(act, 40) || !plain(week, 4) || !ta::ParseScenario(scen))
+      return Deny(res, 400, "malformed activity, week or scenario");
+    double seconds = 15;
+    if (!req.get_param_value("seconds").empty())
+      try { seconds = std::clamp(std::stod(req.get_param_value("seconds")), 1.0, 60.0); } catch (...) {}
+
+    std::string out;
+    const int rc = RunWorkerSync({g_cfg.worker, "explain", "--data", InstanceDir(id),
+                                  "--activity", act, "--week", week, "--scenario", scen,
+                                  "--seconds", std::to_string(seconds)}, seconds, &out);
+    std::ostringstream os;
+    os << "{" << Q("exit") << ":" << rc << "," << Q("output") << ":" << Q(out) << "}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  // Disruption repair: change location supply in the input's own terms, re-plan,
+  // and report what had to move.
+  srv.Post(R"(/api/v1/instances/([a-z0-9]+)/repair)",
+           [](const httplib::Request& req, httplib::Response& res) {
+    if (!Authorised(req)) return Deny(res, 401, "authentication required");
+    const std::string id = req.matches[1];
+    if (!SafeId(id) || !fs::exists(InstanceDir(id))) return Deny(res, 404, "unknown instance");
+    std::string scen = req.get_param_value("scenario");
+    if (scen.empty()) scen = "A";
+    if (!ta::ParseScenario(scen)) return Deny(res, 400, "scenario must be A, B or C");
+    double seconds = 45;
+    if (!req.get_param_value("seconds").empty())
+      try { seconds = std::clamp(std::stod(req.get_param_value("seconds")), 1.0, 90.0); } catch (...) {}
+
+    // supply=LOC@WEEK=N, repeated. Only characters that appear in a location id.
+    std::vector<std::string> specs;
+    for (const auto& [k, v] : req.params) {
+      if (k != "supply") continue;
+      if (v.size() > 80) return Deny(res, 400, "supply specification too long");
+      for (char c : v)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != ':' && c != '_' &&
+            c != '@' && c != '=' && c != '-')
+          return Deny(res, 400, "malformed supply specification");
+      specs.push_back(v);
+      if (specs.size() > 40) return Deny(res, 400, "too many supply overrides");
+    }
+    if (specs.empty()) return Deny(res, 400, "at least one supply override is required");
+
+    const std::string outdir = JobDir("repair_" + RandomId(8));
+    std::error_code ec2;
+    fs::create_directories(outdir, ec2);
+    std::vector<std::string> argv = {g_cfg.worker, "repair", "--data", InstanceDir(id),
+                                     "--out", outdir, "--scenario", scen,
+                                     "--seconds", std::to_string(seconds)};
+    for (const auto& sp : specs) { argv.push_back("--supply"); argv.push_back(sp); }
+    std::string out;
+    const int rc = RunWorkerSync(argv, seconds, &out);
+    std::ostringstream os;
+    os << "{" << Q("exit") << ":" << rc << "," << Q("output") << ":" << Q(out) << "}";
     res.set_content(os.str(), "application/json");
   });
 

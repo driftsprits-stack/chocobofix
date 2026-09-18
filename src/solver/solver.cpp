@@ -5,6 +5,7 @@
 #include <thread>
 #include <map>
 #include <set>
+#include <set>
 #include <sstream>
 
 #include "ortools/sat/cp_model.h"
@@ -84,8 +85,14 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   for (int a = 0; a < na; ++a) {
     LinearExpr yield;
     for (int w = 1; w <= H; ++w) yield += kStdYieldTenths * x[a][w] + 5 * e[a][w];
-    m.AddGreaterOrEqual(yield, inst.activities[a].total_accesses * kStdYieldTenths)
-        .WithName("workload_" + inst.activities[a].id);
+    const int need = inst.activities[a].total_accesses * kStdYieldTenths;
+    m.AddGreaterOrEqual(yield, need).WithName("workload_" + inst.activities[a].id);
+    // No strictly redundant night. Rule 1 only requires the yield to REACH the
+    // workload, but an access that could be dropped while still meeting it wins
+    // nothing and occupies a possession slot another contract could use. The
+    // smallest night yields 10 tenths, so capping the total at need+9 forbids
+    // exactly those accesses and no legal combination of standard/ECLO nights.
+    m.AddLessOrEqual(yield, need + kStdYieldTenths - 1);
   }
 
   // First and last access week per activity, used by precedence and scoring.
@@ -141,12 +148,16 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   const int max_excess = opts.scenario == Scenario::kA ? 0
                        : opts.scenario == Scenario::kC ? 1 : 4;
   std::map<std::pair<LocIdx, Week>, IntVar> excess;
+  // A disruption replaces the nominal supply at specific location-weeks.
+  std::map<std::pair<LocIdx, Week>, int> supply_at;
+  for (const auto& o : opts.supply_overrides) supply_at[{o.location, o.week}] = o.supply;
   if (!(opts.relax & kRelaxCapacity))
   for (LocIdx l = 0; l < static_cast<LocIdx>(inst.locations.size()); ++l) {
     const auto& acts = inst.activities_at[l];
     if (acts.empty()) continue;
-    const int cap = inst.locations[l].supply_capacity;
     for (int w = 1; w <= H; ++w) {
+      auto ov = supply_at.find({l, w});
+      const int cap = ov == supply_at.end() ? inst.locations[l].supply_capacity : ov->second;
       LinearExpr masters, weighted;
       for (ActIdx a : acts) {
         switch (inst.ContractOf(inst.activities[a]).access_type) {
@@ -166,6 +177,12 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
       }
     }
   }
+
+  // Hypotheses under test: a forced or removed access for one activity-week.
+  for (const auto& [a, w] : opts.require)
+    if (a >= 0 && a < na && w >= 1 && w <= H) m.FixVariable(x[a][w], true);
+  for (const auto& [a, w] : opts.forbid)
+    if (a >= 0 && a < na && w >= 1 && w <= H) m.FixVariable(x[a][w], false);
 
   // Rule 4 / R6: pairs whose closure zones reach each other's worksite and which
   // share no location can never be proven to run on different nights, so they may
@@ -226,6 +243,21 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
     objective += (10 * kEcloPenalty) * eclo_total;
   }
   (void)scores_overrun;
+
+  // Repair preference, kept strictly separate from the competition objective
+  // above: it only breaks ties between plans the scenario scores equally, and
+  // the score reported afterwards is recomputed from the plan without it.
+  LinearExpr churn_expr;
+  std::vector<std::vector<bool>> base(na, std::vector<bool>(H + 1, false));
+  if (opts.baseline) {
+    for (const auto& acc : opts.baseline->accesses)
+      if (acc.activity >= 0 && acc.activity < na && acc.week >= 1 && acc.week <= H)
+        base[acc.activity][acc.week] = true;
+    for (int a = 0; a < na; ++a)
+      for (int w = 1; w <= H; ++w)
+        churn_expr += base[a][w] ? (LinearExpr(1) - x[a][w]) : LinearExpr(x[a][w]);
+    if (opts.churn_weight_tenths > 0) objective += opts.churn_weight_tenths * churn_expr;
+  }
   m.Minimize(objective);
 
   // --- search --------------------------------------------------------------
@@ -304,7 +336,19 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   }
   ComputeOccupancy(inst, &out.plan);
   out.score = ComputeScore(inst, out.plan);
-  out.objective_tenths = static_cast<long long>(r.objective_value());
+  // The reported objective is the scenario's own, recomputed from the extracted
+  // plan - never CP-SAT's value, which in repair mode also carries the churn term.
+  out.objective_tenths = out.score.objective_tenths;
+  out.search_objective_tenths = static_cast<long long>(r.objective_value());
+  if (opts.baseline) {
+    std::set<std::pair<ActIdx, Week>> now, was;
+    for (const auto& acc : out.plan.accesses) now.insert({acc.activity, acc.week});
+    for (const auto& acc : opts.baseline->accesses) was.insert({acc.activity, acc.week});
+    int diff = 0;
+    for (const auto& k : now) if (!was.count(k)) ++diff;
+    for (const auto& k : was) if (!now.count(k)) ++diff;
+    out.churn = diff;
+  }
   out.best_bound_tenths = static_cast<long long>(r.best_objective_bound());
   out.status = (r.status() == CpSolverStatus::OPTIMAL) ? SolveStatus::kOptimal
                                                        : SolveStatus::kFeasible;

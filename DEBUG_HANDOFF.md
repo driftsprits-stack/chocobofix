@@ -15,15 +15,17 @@ Working and verified on arm64 macOS 15.6.1:
   feasible, and a second implementation in Python that agrees with it.
 - CLI (`solve`, `validate`, `diagnose`) and an HTTP service with a job queue and
   worker processes.
-- Browser interface: import → generate → schedule → network → check → export, in
-  four languages.
-- 77 unit/mutation/metamorphic checks, 46 integration/security checks, ASan+UBSan
+- Browser interface: import → generate → schedule → network → check → repair →
+  export, in four languages.
+- "Why not earlier?" (`explain`), disruption repair (`repair`), before/after
+  comparison (`compare`) and infeasibility attribution (`diagnose`), each exposed
+  on the CLI and, for the first two, in the interface.
+- 77 unit/mutation/metamorphic checks, 57 integration/security checks, ASan+UBSan
   clean.
 
-Not built at all: disruption repair, "why not earlier?", before/after comparison,
-what-if simulation, user accounts, roles, approvals, plan versioning, TLS,
-CI. `docs/REQUIREMENTS_MATRIX.md` is the authoritative list and is written to be
-believed rather than to look complete.
+Not built at all: what-if beyond reduced access, user accounts, roles, approvals,
+plan versioning, TLS, CI. `docs/REQUIREMENTS_MATRIX.md` is the authoritative list
+and is written to be believed rather than to look complete.
 
 Not done as submission steps: **not deployed** (no URL), **not recorded** (no
 video), **not pushed** (no GitLab remote).
@@ -35,7 +37,7 @@ video), **not pushed** (no GitLab remote).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/check_sample                       # must print SAMPLE ACCEPTED
 ./build/test_core                          # must print 77 passed, 0 failed
-./tests/integration.sh build               # must print 46 passed, 0 failed
+./tests/integration.sh build               # must print 57 passed, 0 failed
 ./build/trackaccess solve --data data/upstream/PS1/01_data --out out/public \
   --scenario all --seconds 120 --workers 8
 ```
@@ -65,6 +67,14 @@ feasibility on the dense synthetic instances, so it is not currently the binding
 constraint. That is evidence, not proof, that it is not costing us much.
 
 ## Known rough edges
+
+0. **The churn preference must stay out of the competition objective.** `repair`
+   adds a small weight for keeping baseline assignments. It is a tie-break only,
+   and `SolveResult::objective_tenths` is deliberately recomputed from the
+   extracted plan rather than taken from CP-SAT's objective value, which in
+   repair mode carries the churn term. If those two are ever conflated, scored
+   runs start optimising the wrong thing and nothing will obviously break.
+
 
 1. **Scenario B may be infeasible on a harder instance.** B forbids any overrun.
    If a hidden instance cannot meet every planned date even with unlimited ECLO
@@ -102,16 +112,12 @@ constraint. That is evidence, not proof, that it is not costing us much.
    that is entirely undone. `docs/DEPLOYMENT.md` is a complete procedure; it needs
    a host and a domain, nothing more. Perhaps two hours.
 2. **Record the video.** `docs/DEMO_SCRIPT.md` is timed and rehearsable.
-3. **"Why not earlier?"** This is the highest-value remaining *feature*, and the
-   architecture already supports it: fix an activity's week with `FixVariable`,
-   re-solve with a short budget, and report the status. The honest answer for a
-   timeout is "could not establish", never "impossible" — `SolveStatus` already
-   makes that distinction, so do not collapse it.
-4. **Disruption repair.** Reduce a location's supply, re-solve with a term that
-   penalises moving already-committed activities, and diff. Keep that
-   minimal-change term *out* of the competition objective — `Score` and the
-   solver objective are currently the same function and must stay that way for
-   scored runs.
+3. **Widen what-if.** Reduced access already works (it is the repair mechanism).
+   Increased workload and reduced workfront availability are not exposed and
+   would each be a small addition to `SolveOptions`.
+4. **Persist repairs as plan versions.** `repair` currently writes to a directory
+   you name and does not record lineage. Storing baseline → repair as a version
+   chain is the first step toward approvals.
 5. Multi-user, if the brief's operational requirements matter more than
    competition score. This is the largest remaining gap and needs a real
    transactional store first.
