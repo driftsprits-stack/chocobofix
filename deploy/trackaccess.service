@@ -1,0 +1,28 @@
+# systemd unit. Verified as written, not as run: no Linux host was available.
+[Unit]
+Description=TrackAccess railway possession planner
+After=network.target
+
+[Service]
+Type=simple
+User=trackaccess
+WorkingDirectory=/opt/trackaccess
+ExecStart=/opt/trackaccess/build/trackaccess-service \
+  --host 127.0.0.1 --port 8080 \
+  --root /var/lib/trackaccess \
+  --web /opt/trackaccess/web \
+  --worker /opt/trackaccess/build/trackaccess \
+  --public-instance /opt/trackaccess/data/upstream/PS1/01_data
+Restart=on-failure
+RestartSec=2
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/trackaccess
+CapabilityBoundingSet=
+MemoryMax=6G
+
+[Install]
+WantedBy=multi-user.target

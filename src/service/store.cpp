@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 
 #include <ctime>
+#include <algorithm>
 #include <memory>
 #include <sstream>
 
@@ -145,7 +146,8 @@ bool Store::Open(const std::string& path, std::string* err) {
       created_at TEXT NOT NULL,
       last_seen TEXT NOT NULL,
       idle_expires_at INTEGER NOT NULL,
-      absolute_expires_at INTEGER NOT NULL);
+      absolute_expires_at INTEGER NOT NULL,
+      idle_seconds INTEGER NOT NULL DEFAULT 1800);
     CREATE INDEX IF NOT EXISTS ix_sessions_user ON sessions(user_id);
     CREATE TABLE IF NOT EXISTS projects (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -315,7 +317,7 @@ std::string Store::CreateSession(long long user_id, int idle_seconds, int absolu
   const std::string token = RandomToken(32);
   const long long now = static_cast<long long>(std::time(nullptr));
   Stmt q(db_, "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,idle_expires_at,"
-              "absolute_expires_at) VALUES(?,?,?,?,?,?)");
+              "absolute_expires_at,idle_seconds) VALUES(?,?,?,?,?,?,?)");
   if (!q.ok()) return "";
   q.Bind(1, Sha256Hex(token));      // only the hash is stored
   q.Bind(2, user_id);
@@ -323,6 +325,7 @@ std::string Store::CreateSession(long long user_id, int idle_seconds, int absolu
   q.Bind(4, NowIso());
   q.Bind(5, now + idle_seconds);
   q.Bind(6, now + absolute_seconds);
+  q.Bind(7, idle_seconds);          // so a refresh uses the configured window
   if (!q.Done()) return "";
   return token;
 }
@@ -331,13 +334,14 @@ std::optional<User> Store::UserForSession(const std::string& token) {
   if (token.empty()) return std::nullopt;
   const std::string h = Sha256Hex(token);
   const long long now = static_cast<long long>(std::time(nullptr));
-  long long user_id = 0, idle_exp = 0, abs_exp = 0;
+  long long user_id = 0, idle_exp = 0, abs_exp = 0, idle_window = 1800;
   {
-    Stmt q(db_, "SELECT user_id,idle_expires_at,absolute_expires_at FROM sessions WHERE token_hash=?");
+    Stmt q(db_, "SELECT user_id,idle_expires_at,absolute_expires_at,idle_seconds "
+                "FROM sessions WHERE token_hash=?");
     if (!q.ok()) return std::nullopt;
     q.Bind(1, h);
     if (!q.Step()) return std::nullopt;
-    user_id = q.Int64(0); idle_exp = q.Int64(1); abs_exp = q.Int64(2);
+    user_id = q.Int64(0); idle_exp = q.Int64(1); abs_exp = q.Int64(2); idle_window = q.Int64(3);
   }
   if (now > idle_exp || now > abs_exp) {
     Stmt d(db_, "DELETE FROM sessions WHERE token_hash=?");
@@ -346,11 +350,12 @@ std::optional<User> Store::UserForSession(const std::string& token) {
   }
   auto u = UserById(user_id);
   if (!u || u->disabled) return std::nullopt;
-  // Sliding idle window, capped by the absolute expiry which never moves.
+  // Sliding idle window of the configured length, capped by the absolute expiry,
+  // which never moves however active the session is.
   Stmt up(db_, "UPDATE sessions SET last_seen=?, idle_expires_at=? WHERE token_hash=?");
   if (up.ok()) {
     up.Bind(1, NowIso());
-    up.Bind(2, std::min<long long>(now + (idle_exp - now > 0 ? 1800 : 1800), abs_exp));
+    up.Bind(2, std::min<long long>(now + idle_window, abs_exp));
     up.Bind(3, h);
     up.Done();
   }

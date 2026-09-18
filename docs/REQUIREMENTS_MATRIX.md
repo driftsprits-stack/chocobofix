@@ -15,7 +15,7 @@ Evidence column names the test or artefact that demonstrates it.
 | # | Deliverable | Status | Evidence / gap |
 | --- | --- | --- | --- |
 | 1 | Public-instance results for A/B/C | **Implemented** | `out/public/{A,B,C}/` — all three feasible, proven optimal |
-| 2 | Hosted live web app for hidden instances | **Partial** | The application is built and runs (`trackaccess-service` + `web/`); upload→solve→validate→export is exercised end to end by `tests/integration.sh`. **It is not deployed and no URL exists.** See `docs/DEPLOYMENT.md`. |
+| 2 | Hosted live web app for hidden instances | **Partial** | The application is built, runs, and was exercised end to end **over HTTPS behind a TLS-terminating proxy** (58 checks). Uploaded datasets are protected by accounts and project ownership, and the solver endpoint is behind authentication, per-job limits and a bounded queue. **It is not deployed and no URL exists** — that needs hosting access; `docs/DEPLOYMENT.md` states exactly what. |
 | 3 | 3-minute YouTube video | **Not implemented** | Script written: `docs/DEMO_SCRIPT.md`. Not recorded, not uploaded. |
 | 4 | GitLab repository | **Partial** | Repository is complete and committed locally with full history and setup instructions. **Not pushed** — no GitLab remote or credentials available. |
 
@@ -76,10 +76,16 @@ Evidence column names the test or artefact that demonstrates it.
 | Bounded queue, cancellation, budgets | Implemented | queue cap 32, concurrent solves capped, per-job time budget |
 | Single writer owns the store | Implemented | clients never touch store files |
 | RAII, no raw owning pointers, sanitizers | Implemented | ASan + UBSan clean on the core and checker |
-| **User accounts, roles, permission matrix** | **Not implemented** | Auth is a single shared bearer token. There are no users, so there are no roles. |
-| **Approvals and approval races** | **Not implemented** | — |
-| **Plan versioning, optimistic concurrency, stale-write rejection** | **Not implemented** | — |
-| **Offline/reconnect reconciliation** | **Not implemented** | — |
+| User accounts, roles, permission matrix | **Implemented** | Four roles in `src/service/store.h`; `RoleHas` is the whole matrix in one readable function. Two deliberate gaps are asserted by tests: an administrator cannot approve, an approver cannot create work. Enforced server-side from the stored role on every request. |
+| Sessions | **Implemented** | Token hash stored, never the token; idle and absolute expiry; revoked on disable and on role change so capabilities cannot go stale. Login throttled per username. |
+| Approvals bound to validation | **Implemented** | An approval records the content hash and validation hash the approver was shown; either mismatching refuses it. A plan with hard violations, or one carrying the fallback marker, is refused at the store level regardless of endpoint or role. |
+| Approval races | **Implemented** | Conditional `UPDATE ... WHERE status='draft'` inside a transaction; the loser is told someone else approved it. Approving a newer version supersedes the older. |
+| Plan versioning | **Implemented** | Versions are immutable and numbered per project+scenario; nothing is rewritten in place. |
+| Optimistic concurrency, stale-write rejection | **Implemented** | Projects carry a revision; a solve states the revision it worked from and a stale one is refused with both values reported, and the interface offers to reload. |
+| Input change invalidates prior approval | **Implemented** | Uploading a different input marks plans built on the old one `invalidated`; they cannot be re-approved without a fresh run. History is kept, not deleted. |
+| Audit history | **Implemented** | Actor, action, object, result, correlation id and timestamp for logins, denials, account changes, uploads, jobs, plan creation, approvals and refusals. Correlation ids originate in the browser. Visible in the interface to approvers and administrators. |
+| Dataset protection | **Implemented** | A project and its uploads are visible to its owner plus approvers and administrators. Another planner receives 404, not 403, so the response does not confirm the project exists. Verified in `tests/test_multiuser.py`. |
+| **Offline/reconnect reconciliation** | **Not implemented** | There is no offline client mode. The interface requires the service. |
 | **Backup, restore, RTO/RPO** | Designed | `docs/DEPLOYMENT.md` describes the procedure. **No restore has been tested, and no RTO/RPO has been measured.** No durability claim is made. |
 | Retries with backoff, idempotency keys | Not implemented | The queue is bounded and jobs are not auto-retried. |
 | Circuit breakers | Not applicable | No external service dependency exists. |
@@ -96,11 +102,12 @@ Evidence column names the test or artefact that demonstrates it.
 | Upload size and row caps, bounded solve concurrency | Implemented | 32 MiB, 500k rows, queue cap |
 | Security headers, no CORS exposure | Implemented | CSP, `nosniff`, `DENY`, `no-referrer` |
 | Secrets outside source and logs | Implemented | token is generated at start or passed in; never written to the store |
-| **Password hashing / identity component** | **Not applicable** | No passwords exist, because no accounts exist. |
-| **TLS** | **Not implemented** | Terminate in front of the service. `docs/DEPLOYMENT.md`. No certificate handling in-process. |
-| **Rate limiting on authentication** | **Not implemented** | Only the queue cap bounds work. |
-| **Multi-organisation isolation** | **Not implemented** | Explicitly single-tenant. No `tenant_id` exists, and none is pretended. |
-| **Audit events separate from diagnostic logs** | **Not implemented** | — |
+| Password hashing | **Implemented** | The platform's vetted PBKDF2-HMAC-SHA256 (CommonCrypto on Apple, OpenSSL elsewhere), 210 000 iterations, per-user salt, cost stored with the hash. No cryptography is implemented in this project. Verified by known-answer and behaviour tests. |
+| TLS | **Partial** | Terminated by a reverse proxy, not in-process — deliberate. The shape was tested end to end over HTTPS (58 checks); `deploy/Caddyfile` and `deploy/nginx.conf` are written but **not run**. Certificate verification is never disabled; `TA_CA` supplies an internal CA instead. |
+| Rate limiting on authentication | **Implemented** | Per-username failure throttle, 10 attempts per 15 minutes, bounded in memory. Costly work is additionally bounded by the solve queue and concurrency caps. |
+| **Multi-organisation isolation** | **Not implemented** | Explicitly single-tenant. No `tenant_id` exists, and none is pretended. Project-level isolation exists and is tested, but it is not tenancy. |
+| Audit events separate from diagnostic logs | **Implemented** | Audit events go to the `audit` table with a defined shape; worker output and service diagnostics go to stdout and the job log, and are never mixed in. |
+| **Tamper-evident audit** | **Not implemented** | The audit table is ordinary rows. An administrator with database access could alter them. No hash chain is claimed, because a hash chain alone would not stop that either. |
 | SBOM / dependency scanning | Partial | Two dependencies, both pinned with recorded SHA-256 and licences listed in the README. No automated scanner runs. |
 | PDPA / compliance mapping | Not implemented | The application stores no personal data: no accounts, no names, no contact details. No compliance claim is made. |
 
@@ -108,13 +115,13 @@ Evidence column names the test or artefact that demonstrates it.
 
 | | Status | Evidence |
 | --- | --- | --- |
-| Unit tests for critical rules | Implemented | 77 checks in `test_core` |
+| Unit tests for critical rules | Implemented | 90 checks in `test_core`, including rule-6 counterexamples on a purpose-built micro instance |
 | Mutation tests the checker must reject | Implemented | 9 mutations, each breaking one rule |
 | Metamorphic tests | Partial | Row-order invariance implemented. **ID relabelling invariance is not implemented.** |
 | Official-validator comparison | **Impossible** | The reference validator is not published in the problem repository. Corroboration is against the shipped sample instead, and every report says so. |
-| Integration / end-to-end | Implemented | 63 checks in `tests/integration.sh` |
-| Security tests | Implemented | auth, traversal, filename restriction, unknown ids |
-| Concurrency / approval races | Not implemented | No approvals exist to race. |
+| Integration / end-to-end | Implemented | 121 checks in `tests/integration.sh`, which includes a 59-check HTTP suite driving exactly what the interface calls |
+| Security tests | Implemented | auth, sessions, role matrix, project isolation, traversal, filename restriction, unknown ids, malformed uploads |
+| Concurrency / approval races | **Implemented** | Store tests cover a second approver losing cleanly, stale-revision rejection, and supersession. |
 | Load and stress | Partial | Measured on the public instance and on synthetic multiples; see `docs/TEST_REPORT.md` |
 | Resilience (kill worker) | Implemented | `tests/integration.sh` |
 | Sanitizers | Implemented | ASan + UBSan clean |

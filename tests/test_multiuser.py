@@ -7,10 +7,20 @@ trusted when it should not be.
 
 usage: tests/test_multiuser.py [base_url]
 """
-import json, sys, time, urllib.parse, urllib.request, urllib.error
+import json, os, ssl, sys, time, urllib.parse, urllib.request, urllib.error
 
 BASE = (sys.argv[1] if len(sys.argv) > 1 else 'http://127.0.0.1:8150') + '/api/v1'
 P = F = 0
+
+# Certificate verification is never disabled. To test against a deployment whose
+# certificate is issued by an internal CA (or a throwaway one, as in
+# docs/DEPLOYMENT.md), point TA_CA at that CA's PEM file and it is trusted for
+# this run only.
+_CTX = None
+if BASE.startswith('https://'):
+    _CTX = ssl.create_default_context(cafile=os.environ.get('TA_CA') or None)
+_OPENER = urllib.request.build_opener(
+    urllib.request.HTTPSHandler(context=_CTX)) if _CTX else urllib.request.build_opener()
 
 def ok(m):
     global P; P += 1; print(f'  ok   {m}')
@@ -35,7 +45,7 @@ def call(method, path, token=None, params=None, files=None, expect=None):
         body = b''.join(parts)
         req.add_header('Content-Type', f'multipart/form-data; boundary={boundary}')
     try:
-        with urllib.request.urlopen(req, body, timeout=120) as r:
+        with _OPENER.open(req, body, timeout=120) as r:
             raw = r.read()
             return r.status, (json.loads(raw) if raw[:1] in (b'{', b'[') else raw)
     except urllib.error.HTTPError as e:

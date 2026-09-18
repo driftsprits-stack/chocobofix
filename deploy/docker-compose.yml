@@ -1,0 +1,31 @@
+# NOT RUN. See the note at the top of deploy/Dockerfile.
+services:
+  trackaccess:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    restart: unless-stopped
+    volumes:
+      - trackaccess-data:/var/lib/trackaccess
+    # Published to loopback only: the proxy below is the only way in.
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      - TZ=Asia/Singapore
+
+  proxy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [trackaccess]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  trackaccess-data:
+  caddy-data:
+  caddy-config:

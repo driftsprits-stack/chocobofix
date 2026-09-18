@@ -18,10 +18,14 @@ estimated or carried over from a previous run.
 
 | Suite | Command | Result |
 | --- | --- | --- |
-| Unit / mutation / metamorphic | `./build/test_core` | **77 passed, 0 failed** |
+| Rules, counterexamples, mutations, metamorphic | `./build/test_core` | **90 passed, 0 failed** |
+| Accounts, roles, approvals, concurrency | `./build/test_store` | **94 passed, 0 failed** |
 | Sample corroboration | `./build/check_sample` | **sample accepted, 0 hard violations** |
-| Integration / API / security | `./tests/integration.sh build` | **63 passed, 0 failed** |
+| Integration / API / security | `./tests/integration.sh build` | **121 passed, 0 failed** |
+| Shared-project layer over HTTPS | `tests/test_multiuser.py https://…` | **58 passed, 0 failed** |
 | ASan + UBSan | `./build-asan/test_core`, `./build-asan/check_sample` | **clean, no reports** |
+
+**305 automated checks in total.**
 
 The mutation group is the load-bearing part: nine deliberately broken schedules,
 each violating one rule, which the checker must reject — a dropped access-night,
@@ -151,6 +155,54 @@ An instance was constructed by pulling every `planned_completion_date` back to
 That the breach set is exactly `{planned_date}` is the property that matters: the
 fallback relaxes the scenario's policy and nothing else.
 
+## 4c. Shared-project layer
+
+`./build/test_store` (94 checks) and `tests/test_multiuser.py` (58 over HTTP,
+58 over HTTPS) cover the parts that decide whether a plan can be trusted.
+
+| Property | Result |
+| --- | --- |
+| Password hashing | PBKDF2-HMAC-SHA256 via the platform (CommonCrypto here), 210 000 iterations, per-user salt; the password never appears in the stored record, and the same password hashes differently each time |
+| **An administrator cannot approve a plan** | refused, 403 |
+| **An approver cannot create a plan** | refused, 403 |
+| **A planner cannot approve their own work** | refused, 403 |
+| Approval with a wrong content hash | refused, 409 |
+| Approval with a wrong validation hash | refused, 409 |
+| Approval of a plan with hard violations | refused at the store, whatever the role |
+| Approval of a fallback plan | refused at the store, whatever the role |
+| Double approval of one version | refused, 409 |
+| Approving a newer version | supersedes the older one |
+| Replacing a project's input | marks plans built on the old input `invalidated`; they cannot be re-approved |
+| Stale project revision on a solve | refused, 409, reporting both revisions |
+| Another planner reading someone else's project | **404, not 403** — existence is not confirmed |
+| Another planner solving in it, or reading its dataset | 404 |
+| It appearing in their project list | absent |
+| Session revoked on logout / disable / role change | stops working immediately |
+| Absolute session expiry | enforced even when the idle window is wide open |
+| Audit coverage | `auth.login`, `authz.deny`, `user.create`, `project.create`, `instance.upload`, `job.create`, `plan.create`, `plan.approve` (both `ok` and `refused`) |
+
+## 4d. Hosted deployment shape
+
+Tested on 2026-09-18 with the service on loopback and a TLS terminator in front
+(`deploy/tls_proxy.py`, written for the test because neither Caddy nor nginx was
+installed).
+
+| Check | Result |
+| --- | --- |
+| `GET /api/v1/health` over HTTPS | 200, TLS 1.2+ negotiated |
+| Browser interface served over HTTPS | served |
+| Security headers survive the proxy | CSP, `nosniff`, `DENY`, `no-referrer` present |
+| **Full shared-project suite over HTTPS** | **58 passed, 0 failed** |
+| Plain HTTP against the TLS port | refused |
+| Certificate expiry readable for monitoring | `notAfter` reported by `openssl s_client` |
+
+Certificate verification was never disabled; the throwaway CA was supplied
+through `TA_CA`, which is the same mechanism an internal-CA deployment uses.
+
+**Not tested:** `deploy/Dockerfile` (never built — no container runtime),
+`deploy/Caddyfile`, `deploy/nginx.conf`, `deploy/trackaccess.service` (written,
+not run), and automatic certificate issuance.
+
 ## 5. Service behaviour
 
 | Measurement | Result |
@@ -186,9 +238,11 @@ All in `tests/integration.sh`:
   in the problem repository. Every corroboration here is against the shipped
   sample submission using our own checker.
 - **No CI pipeline exists.** No coverage figure is measured, so none is quoted.
-- **No Windows or Linux build was produced or executed.** Only arm64 macOS 15.6.1
-  was built and tested. The CMake configuration is portable and
-  `scripts/fetch_deps.sh` selects a Linux asset, but that path is **unverified**.
+- **No Linux or Windows build was produced or executed.** Only arm64 macOS
+  15.6.1. `scripts/fetch_deps.sh` selects a Linux OR-Tools asset and the CMake
+  configuration is portable, but that path is **unverified**.
+- **The container image has never been built.**
+- **Nothing is deployed and no URL exists.**
 - **No backup restore was rehearsed**, so no RTO or RPO is measured.
 - **No multi-user, approval-race or cross-tenant test exists**, because accounts,
   approvals and tenancy are not implemented.

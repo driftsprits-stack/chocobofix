@@ -20,7 +20,8 @@ in memory.
 | Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
 | Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
 | Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 77 unit + 63 integration/security, ASan+UBSan clean |
+| Tests | 90 core + 91 store + 121 integration/security, ASan+UBSan clean |
+| Multi-user | accounts, roles, sessions, plan versions, validation-bound approvals, audit — all through the interface |
 | Hosted deployment | **not deployed** — see [Deployment](#deployment). No URL exists yet. |
 | Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
 
@@ -39,18 +40,32 @@ corroborated and where it is a conservative reading.
 
 ---
 
-## Prerequisites
+## Clean-machine setup
 
-- A C++20 compiler. Developed with Apple clang 17; GCC 12+ / clang 15+ should work.
-- CMake ≥ 3.20.
-- `curl`, `tar`, and Python 3.9+ (Python is used only by the cross-check and
-  derivation tools, never by the application at runtime).
+Verified on a clean checkout on arm64 macOS 15.6.1. Each step is a command you
+can paste; nothing else is required.
 
-No other system packages are required. OR-Tools is fetched as a pinned binary
-distribution into `third_party/` — it is **not** installed system-wide and needs
-no Homebrew, apt, or sudo.
+### 1. Prerequisites
 
-## Build
+| Need | macOS | Debian / Ubuntu |
+| --- | --- | --- |
+| C++20 compiler | Xcode Command Line Tools (`xcode-select --install`) | `build-essential` (GCC 12+) |
+| CMake ≥ 3.20 | `brew install cmake` | `cmake` |
+| SQLite headers | in the macOS SDK, nothing to install | `libsqlite3-dev` |
+| Password hashing | CommonCrypto, in the SDK | `libssl-dev` (OpenSSL) |
+| `curl`, `tar`, Python 3.9+ | preinstalled | `curl ca-certificates python3` |
+
+```bash
+# Debian / Ubuntu, one line
+sudo apt-get install -y build-essential cmake curl ca-certificates                         libsqlite3-dev libssl-dev python3
+```
+
+Python is used only by the cross-check and test tools, never by the application
+at runtime. **No other system packages are needed.** OR-Tools is fetched as a
+pinned binary into `third_party/` — not installed system-wide, no sudo, no
+Homebrew formula.
+
+### 2. Fetch dependencies and build
 
 ```bash
 ./scripts/fetch_deps.sh
@@ -58,24 +73,79 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
-Produces `build/trackaccess` (CLI) and `build/trackaccess-service` (HTTP service).
+`fetch_deps.sh` downloads OR-Tools 9.14.6206 for the host triple and
+cpp-httplib 0.18.3, printing and verifying SHA-256 for both. Roughly 46 MB.
 
-## Run the solver
+### 3. Prove the build before trusting it
 
 ```bash
-./build/trackaccess solve \
-  --data data/upstream/PS1/01_data \
-  --out  out/public \
-  --scenario all --seconds 120 --workers 8
+./build/test_core        # 90 checks: rules, counterexamples, mutations
+./build/test_store       # 91 checks: accounts, roles, approvals, concurrency
+./build/check_sample     # our checker must accept the organisers' own sample
+```
+
+If any of those fail, stop — something in the rule model or the store changed.
+
+## Exact local launch command
+
+Single planner, offline, on this machine:
+
+```bash
+./build/trackaccess-service   --host 127.0.0.1 --port 8080   --root ./var   --web ./web   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data
+```
+
+Then open **http://127.0.0.1:8080/**. With no accounts yet, the sign-in screen
+offers to create the first administrator. To skip that prompt:
+
+```bash
+./build/trackaccess-service   --host 127.0.0.1 --port 8080 --root ./var --web ./web   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data   --bootstrap-admin "admin:choose-a-long-password"
+```
+
+`--bootstrap-admin` is ignored once any account exists. Other options:
+`--max-solves` (default 2), `--max-seconds` (120), `--session-idle` (1800),
+`--session-max` (28800).
+
+The administrator then creates `planner`, `approver` and `viewer` accounts from
+the **Accounts** tab. Those four roles are what the workflow below assumes.
+
+For a shared or hosted deployment, put TLS in front and follow
+`docs/DEPLOYMENT.md`. The service binds loopback by default and warns if told
+to bind anywhere else.
+
+## Using it
+
+**Project → Import → Generate → Schedule → Network → Check → Repair → Versions →
+Export**, with **Audit** and **Accounts** appearing for the roles that have them.
+
+1. **Project** — create one (planner), then pick an instance or import a new one.
+2. **Import** — drop the eight CSVs, or press *Load public instance*. Every input
+   problem is reported with file, row and field.
+3. **Generate** — pick A, B, C or all three; watch progress; stop if you want.
+4. **Schedule / Network / Check** — the timeline, per-week occupancy against
+   supply, and the conformance report.
+5. **Repair** — apply a disruption and see what it costs before accepting it.
+6. **Versions** — every solve is recorded as an immutable version. An approver
+   signs one off; the approval is bound to the exact plan and validation shown.
+7. **Export** — download the three competition files.
+
+Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Text size adjusts
+from the header. Every control is keyboard reachable; no interaction is
+drag-only.
+
+## Running the solver from the command line
+
+```bash
+./build/trackaccess solve   --data data/upstream/PS1/01_data   --out  out/public   --scenario all --seconds 120 --workers 8
 ```
 
 Writes `out/public/{A,B,C}/` each containing `SCHEDULE_ACCESS.csv`,
-`SCHEDULE_OCCUPANCY.csv`, `RESULTS.csv` and `VALIDATION.json`. The exported files
-are re-read and re-checked before the run reports success.
+`SCHEDULE_OCCUPANCY.csv`, `RESULTS.csv` and `VALIDATION.json`. The exported
+files are re-read and re-checked before the run reports success.
 
-`--scenario` takes `A`, `B`, `C` or `all`. `--seconds` is the per-scenario search
-budget; `--seed` makes a run reproducible. Ctrl-C stops the search and keeps the
-best complete plan already found.
+`--scenario` takes `A`, `B`, `C` or `all`. `--seconds` is the per-scenario
+budget; `--seed` makes a run reproducible; `--strict-buffers` uses the stricter
+reading of rule 6 (see `docs/DERIVED_RULES.md` R6c). Ctrl-C stops the search and
+keeps the best complete plan already found.
 
 Exit codes: `0` success · `1` usage or input error · `2` no plan produced ·
 `3` the plan failed the independent check.
@@ -88,14 +158,12 @@ reports `infeasible` and **exports nothing** — an unsubmittable plan should no
 look submittable.
 
 `--fallback` changes that: the scenario's own policy is priced instead of
-forbidden, while **every physical safety rule stays hard** — closures, buffers,
-legal mixes, precedence, planned start weeks, workfronts. The result is written
-with a `NOT_SUBMISSION_READY.txt` beside it, the run says so loudly, and
-`VALIDATION.json` lists the breaches, which by construction are only the policy
-ones. Use it to see how far out of policy an instance is; never submit it as a
-conforming answer.
+forbidden, while **every physical safety rule stays hard**. The result is written
+with a `NOT_SUBMISSION_READY.txt` beside it, the run says so loudly, and the
+store **refuses to approve it** no matter who asks. Use it to see how far out of
+policy an instance is; never submit it as a conforming answer.
 
-## Explain, repair, compare
+## Explain, repair, compare## Explain, repair, compare
 
 **Why not earlier?** — test whether an activity could take an access in a given
 week, and if not, which rule stands in the way:
@@ -190,11 +258,39 @@ drag-only interaction.
 ## Tests
 
 ```bash
-./build/test_core              # 77 unit, mutation and metamorphic checks
-./build/check_sample           # our checker must accept the upstream sample
-./tests/integration.sh build   # 63 end-to-end, API and security checks
-ctest --test-dir build         # runs the first two under CTest
+./build/test_core                    # 90 rule, counterexample and mutation checks
+./build/test_store                   # 91 account, role, approval and concurrency checks
+./build/check_sample                 # our checker must accept the upstream sample
+./tests/integration.sh build         # 121 end-to-end, API and security checks
+python3 tests/test_multiuser.py      # the shared-project suite on its own
+ctest --test-dir build               # runs the three C++ suites under CTest
 ```
+
+## Platform and feature support
+
+**Tested** means built and executed here, with the result recorded in
+`docs/TEST_REPORT.md`. Nothing else is claimed.
+
+| Platform | Build | Tests | Notes |
+| --- | --- | --- | --- |
+| **arm64 macOS 15.6.1** | **tested** | **tested** | Apple clang 17, CMake 4.4.3, OR-Tools 9.14.6206 arm64 |
+| x86_64 macOS | not built | not run | `fetch_deps.sh` selects the right asset; unverified |
+| x86_64 / arm64 Linux | **not built** | **not run** | CMake is portable and an OR-Tools asset is selected, but nothing was compiled or executed |
+| Windows | not attempted | — | no configuration written |
+| Container image | **never built** | — | `deploy/Dockerfile` is unverified; see `docs/DEPLOYMENT.md` |
+
+| Feature | Status |
+| --- | --- |
+| Scenarios A / B / C, proven optimal on the public instance | tested |
+| Independent checker, cross-checked by a second implementation | tested |
+| Explain, repair, compare, diagnose, fallback, strict-buffers | tested |
+| Accounts, roles, sessions, project isolation | tested |
+| Plan versions, validation-bound approvals, revocation, invalidation | tested |
+| Optimistic concurrency, audit trail | tested |
+| Four-language interface | strings complete; **ms/zh/ta unreviewed by a fluent speaker** |
+| TLS-terminated hosted shape | tested locally with a throwaway certificate; **not deployed** |
+| Backup / restore | procedure written; **restore never rehearsed** |
+| CI | **none configured** |
 
 Sanitizers:
 

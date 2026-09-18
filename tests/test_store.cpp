@@ -122,6 +122,21 @@ int main() {
           "a disabled account cannot sign in");
     Check(s.SetUserDisabled(viewer.id, false, &err), "and can be re-enabled");
 
+    // The idle window is the configured one, and the absolute expiry caps it:
+    // an active session cannot extend itself past its hard limit.
+    {
+      const std::string brief_tok = s.CreateSession(planner.id, 5, 10);
+      Check(s.UserForSession(brief_tok).has_value(), "a short-window session works immediately");
+      Check(s.UserForSession(brief_tok).has_value(), "and keeps working while it is being used");
+      s.RevokeSession(brief_tok);
+    }
+    {
+      // Absolute expiry already passed, idle window generous: still refused.
+      const std::string stale = s.CreateSession(planner.id, 3600, -1);
+      Check(!s.UserForSession(stale).has_value(),
+            "the absolute expiry is enforced even when the idle window is wide open");
+    }
+
     const std::string t3 = s.CreateSession(planner.id, 1800, 28800);
     Check(s.SetUserRole(planner.id, Role::kPlanner, &err), "a role can be set");
     Check(!s.UserForSession(t3).has_value(),

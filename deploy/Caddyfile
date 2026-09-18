@@ -1,0 +1,30 @@
+# TLS-terminating reverse proxy for TrackAccess.
+#
+# Caddy obtains and renews a certificate automatically. Replace the site address
+# with whatever hostname the deployment actually has - a provider subdomain such
+# as trackaccess.fly.dev is fine; a custom domain is not required.
+#
+#   caddy run --config deploy/Caddyfile
+
+trackaccess.example.org {
+	encode gzip
+
+	# The service caps uploads at 32 MiB; refuse anything larger before it
+	# reaches the application.
+	request_body {
+		max_size 32MB
+	}
+
+	# The service binds loopback only. Nothing else should be able to reach it.
+	reverse_proxy 127.0.0.1:8080
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	log {
+		output file /var/log/caddy/trackaccess.log
+		format json
+	}
+}
