@@ -145,8 +145,11 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   // minimum slot count exactly (see docs/DERIVED_RULES.md R3):
   //     slots >= n_PM + n_PC
   //   4*slots >= n_C + 4*n_PM + n_PC
-  const int max_excess = opts.scenario == Scenario::kA ? 0
-                       : opts.scenario == Scenario::kC ? 1 : 4;
+  int max_excess = opts.scenario == Scenario::kA ? 0
+                 : opts.scenario == Scenario::kC ? 1 : 4;
+  // In fallback mode the supply ceiling stops being a wall. It is still paid for
+  // at the scenario's own rate, plus the fallback surcharge below.
+  if (opts.soft_scenario_policy) max_excess = std::max(max_excess, 8);
   std::map<std::pair<LocIdx, Week>, IntVar> excess;
   // A disruption replaces the nominal supply at specific location-weeks.
   std::map<std::pair<LocIdx, Week>, int> supply_at;
@@ -224,7 +227,13 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
     m.AddGreaterOrEqual(overrun[a], LinearExpr(7 * last[a]) - static_cast<int>(P));
     if (opts.scenario == Scenario::kB) {
       // Planned dates are rigid in B: a feasible submission has zero overrun.
-      m.AddLessOrEqual(LinearExpr(7 * last[a]), static_cast<int>(P));
+      if (!opts.soft_scenario_policy) {
+        m.AddLessOrEqual(LinearExpr(7 * last[a]), static_cast<int>(P));
+      } else {
+        // Out of policy, but priced far above any legitimate lever so the search
+        // still exhausts ECLO and extra nights before accepting a single day late.
+        objective += 1000 * overrun[a];
+      }
     } else {
       objective += static_cast<int>(ContractWeight(c.priority) *
                                     ActivityNudgeTenths(inst.activities[a].activity_priority)) *
@@ -234,7 +243,11 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   if (!excess.empty()) {
     LinearExpr ex_total;
     for (auto& [k, v] : excess) ex_total += v;
-    objective += (10 * kExcessAccessPenalty) * ex_total;
+    int rate = 10 * kExcessAccessPenalty;
+    // A and C cap excess as policy; when that cap is lifted, each night beyond it
+    // costs far more than any in-policy alternative.
+    if (opts.soft_scenario_policy && opts.scenario != Scenario::kB) rate += 10000;
+    objective += rate * ex_total;
   }
   if (opts.scenario != Scenario::kA) {
     LinearExpr eclo_total;

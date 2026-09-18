@@ -20,7 +20,7 @@ estimated or carried over from a previous run.
 | --- | --- | --- |
 | Unit / mutation / metamorphic | `./build/test_core` | **77 passed, 0 failed** |
 | Sample corroboration | `./build/check_sample` | **sample accepted, 0 hard violations** |
-| Integration / API / security | `./tests/integration.sh build` | **57 passed, 0 failed** |
+| Integration / API / security | `./tests/integration.sh build` | **63 passed, 0 failed** |
 | ASan + UBSan | `./build-asan/test_core`, `./build-asan/check_sample` | **clean, no reports** |
 
 The mutation group is the load-bearing part: nine deliberately broken schedules,
@@ -135,6 +135,21 @@ instances — location capacity interacting with planned start weeks is.
 The cascade in the second row is the point of the feature: moving A004 into week
 16 requires A003 to finish by week 15, which in turn displaces A007. The tool
 shows that before anything is committed.
+
+## 4b. Unsatisfiable scenario policy
+
+An instance was constructed by pulling every `planned_completion_date` back to
+2027-03-21, which Scenario B cannot meet.
+
+| Check | Result |
+| --- | --- |
+| `solve --scenario B` (default) | **infeasible**, nothing exported |
+| `solve --scenario B --fallback` | plan exported, run prints `OUT OF POLICY`, `NOT_SUBMISSION_READY.txt` written |
+| Breaches in the fallback plan | **13, all `planned_date`** — no closure, buffer, capacity, mix, allocation, workfront or precedence breach |
+| Levers spent before accepting lateness | 60 ECLO nights and 1 excess access-night |
+
+That the breach set is exactly `{planned_date}` is the property that matters: the
+fallback relaxes the scenario's policy and nothing else.
 
 ## 5. Service behaviour
 

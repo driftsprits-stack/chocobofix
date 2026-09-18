@@ -41,7 +41,7 @@ int Usage() {
   std::cerr <<
       "usage:\n"
       "  trackaccess solve    --data DIR --out DIR [--scenario A|B|C|all]\n"
-      "                       [--seconds N] [--workers N] [--seed N] [--log]\n"
+      "                       [--seconds N] [--workers N] [--seed N] [--log] [--fallback]\n"
       "  trackaccess validate --data DIR --submission DIR\n"
       "  trackaccess diagnose --data DIR [--scenario A|B|C] [--seconds N]\n"
       "  trackaccess explain  --data DIR --activity ID --week N [--scenario A|B|C]\n"
@@ -80,6 +80,7 @@ int RunSolve(const std::vector<std::string>& args) {
   opts.workers = std::stoi(Arg(args, "--workers", "8"));
   opts.random_seed = std::stoi(Arg(args, "--seed", "1"));
   opts.log_search = Flag(args, "--log");
+  const bool fallback = Flag(args, "--fallback");
 
   std::cout << "instance " << data << "\n  activities=" << inst.activities.size()
             << " contracts=" << inst.contracts.size()
@@ -96,6 +97,7 @@ int RunSolve(const std::vector<std::string>& args) {
 
     std::cout << "\n=== scenario " << ta::ToString(sc) << " (budget "
               << opts.max_seconds << "s, " << opts.workers << " workers) ===\n";
+    bool used_fallback = false;
     auto res = ta::Solve(inst, opts, &g_cancel,
                          [](long long obj, double el) {
                            std::cout << "  [" << el << "s] objective " << (obj / 10) << "."
@@ -103,6 +105,21 @@ int RunSolve(const std::vector<std::string>& args) {
                          });
     std::cout << "  status: " << ta::ToString(res.status) << "  (" << res.solver_detail << ")\n";
     if (!res.message.empty()) std::cout << "  note: " << res.message << "\n";
+
+    if (res.status == ta::SolveStatus::kInfeasible && fallback) {
+      // The scenario's policy cannot be met. Retry with that policy priced rather
+      // than forbidden, keeping every safety rule hard, so the operator sees how
+      // far out of policy the instance is instead of receiving nothing.
+      std::cout << "  scenario policy cannot be satisfied; retrying with the policy\n"
+                   "  priced instead of forbidden (safety rules stay hard)\n";
+      ta::SolveOptions fb = opts;
+      fb.soft_scenario_policy = true;
+      auto alt = ta::Solve(inst, fb, &g_cancel, nullptr);
+      if (alt.status == ta::SolveStatus::kOptimal || alt.status == ta::SolveStatus::kFeasible) {
+        res = std::move(alt);
+        used_fallback = true;
+      }
+    }
     if (res.status != ta::SolveStatus::kOptimal && res.status != ta::SolveStatus::kFeasible) {
       worst = std::max(worst, 2);
       continue;
@@ -125,6 +142,26 @@ int RunSolve(const std::vector<std::string>& args) {
     }
     const auto rep = ta::Validate(inst, reread);
     std::cout << "  exported to " << dir << "\n";
+    if (used_fallback) {
+      std::cout << "  *** OUT OF POLICY: this plan breaches scenario "
+                << ta::ToString(sc) << "'s own rule and is NOT\n"
+                   "  *** submission-ready. Every physical safety rule is still met. The\n"
+                   "  *** breaches are listed below and in VALIDATION.json.\n";
+      const std::string marker = dir + "/NOT_SUBMISSION_READY.txt";
+      FILE* f = std::fopen(marker.c_str(), "wb");
+      if (f) {
+        const std::string msg =
+            "This directory holds a plan produced in fallback mode.\n"
+            "Scenario " + std::string(ta::ToString(sc)) + "'s own policy constraint could not be\n"
+            "satisfied for this instance, so it was priced rather than enforced.\n"
+            "Every physical safety rule (closures, buffers, legal mixes, precedence,\n"
+            "planned start weeks, workfronts) is still satisfied.\n\n"
+            "This plan is NOT conforming and must not be submitted as if it were.\n"
+            "See VALIDATION.json for the exact breaches.\n";
+        std::fwrite(msg.data(), 1, msg.size(), f);
+        std::fclose(f);
+      }
+    }
     std::cout << "  independent check: " << (rep.feasible ? "FEASIBLE" : "HARD VIOLATIONS")
               << " (" << rep.hard_violations.size() << ")\n";
     for (size_t i = 0; i < rep.hard_violations.size() && i < 10; ++i)

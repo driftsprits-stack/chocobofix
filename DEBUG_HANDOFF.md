@@ -20,7 +20,7 @@ Working and verified on arm64 macOS 15.6.1:
 - "Why not earlier?" (`explain`), disruption repair (`repair`), before/after
   comparison (`compare`) and infeasibility attribution (`diagnose`), each exposed
   on the CLI and, for the first two, in the interface.
-- 77 unit/mutation/metamorphic checks, 57 integration/security checks, ASan+UBSan
+- 77 unit/mutation/metamorphic checks, 63 integration/security checks, ASan+UBSan
   clean.
 
 Not built at all: what-if beyond reduced access, user accounts, roles, approvals,
@@ -37,7 +37,7 @@ video), **not pushed** (no GitLab remote).
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 ./build/check_sample                       # must print SAMPLE ACCEPTED
 ./build/test_core                          # must print 77 passed, 0 failed
-./tests/integration.sh build               # must print 57 passed, 0 failed
+./tests/integration.sh build               # must print 63 passed, 0 failed
 ./build/trackaccess solve --data data/upstream/PS1/01_data --out out/public \
   --scenario all --seconds 120 --workers 8
 ```
@@ -78,11 +78,14 @@ constraint. That is evidence, not proof, that it is not costing us much.
 
 1. **Scenario B may be infeasible on a harder instance.** B forbids any overrun.
    If a hidden instance cannot meet every planned date even with unlimited ECLO
-   and extra nights, B correctly returns `infeasible`. The tool reports that
-   honestly and exports nothing for B. Decide before submission whether an
-   infeasible B should instead export a best-effort plan clearly labelled as
-   non-conforming — currently it does not, on the principle that an
-   unsubmittable file should not look submittable.
+   and extra nights, B correctly returns `infeasible` and exports nothing.
+   `--fallback` covers that case: it prices the scenario policy instead of
+   enforcing it, keeps every physical safety rule hard, and marks the output
+   `NOT_SUBMISSION_READY`. A test asserts the only resulting breaches are
+   `planned_date` — never a safety rule. **Decide deliberately whether to pass
+   `--fallback` for the hidden-instance run.** It is off by default because an
+   unsubmittable file should not look submittable; it is available because
+   nothing at all scores nothing at all.
 
 2. **The worker-crash test is weakly exercised.** The public instance solves in
    under a second, so `pkill` usually lands after completion. The service's

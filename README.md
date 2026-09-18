@@ -20,7 +20,7 @@ in memory.
 | Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
 | Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
 | Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 77 unit + 57 integration/security, ASan+UBSan clean |
+| Tests | 77 unit + 63 integration/security, ASan+UBSan clean |
 | Hosted deployment | **not deployed** — see [Deployment](#deployment). No URL exists yet. |
 | Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
 
@@ -79,6 +79,21 @@ best complete plan already found.
 
 Exit codes: `0` success · `1` usage or input error · `2` no plan produced ·
 `3` the plan failed the independent check.
+
+### When a scenario's policy cannot be met
+
+Scenario B forbids any overrun, and Scenario A forbids any extra access-night. On
+a sufficiently tight instance those policies are unsatisfiable, and the tool then
+reports `infeasible` and **exports nothing** — an unsubmittable plan should not
+look submittable.
+
+`--fallback` changes that: the scenario's own policy is priced instead of
+forbidden, while **every physical safety rule stays hard** — closures, buffers,
+legal mixes, precedence, planned start weeks, workfronts. The result is written
+with a `NOT_SUBMISSION_READY.txt` beside it, the run says so loudly, and
+`VALIDATION.json` lists the breaches, which by construction are only the policy
+ones. Use it to see how far out of policy an instance is; never submit it as a
+conforming answer.
 
 ## Explain, repair, compare
 
@@ -177,7 +192,7 @@ drag-only interaction.
 ```bash
 ./build/test_core              # 77 unit, mutation and metamorphic checks
 ./build/check_sample           # our checker must accept the upstream sample
-./tests/integration.sh build   # 57 end-to-end, API and security checks
+./tests/integration.sh build   # 63 end-to-end, API and security checks
 ctest --test-dir build         # runs the first two under CTest
 ```
 

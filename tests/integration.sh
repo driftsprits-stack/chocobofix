@@ -101,6 +101,34 @@ a=$("$BUILD/trackaccess" validate --data "$DATA" --submission "$TMP/out/A" 2>/de
      | python3 -c 'import json,sys;print(json.load(sys.stdin)["soft_scores"]["objective_score"])')
 [ -n "$a" ] && ok "scenario A objective recomputed from file: $a" || no "objective recomputed"
 
+echo "== an infeasible scenario policy: refuse by default, fall back only on request =="
+cp -r "$DATA" "$TMP/tight"
+python3 - "$TMP/tight" <<'PYEOF'
+import csv, sys
+p = sys.argv[1] + '/07_PROJECT_DETAILS.csv'
+rows = list(csv.DictReader(open(p)))
+for r in rows: r['planned_completion_date'] = '2027-03-21'
+with open(p, 'w', newline='') as f:
+    w = csv.DictWriter(f, fieldnames=rows[0].keys()); w.writeheader(); w.writerows(rows)
+PYEOF
+"$BUILD/trackaccess" solve --data "$TMP/tight" --out "$TMP/tb1" --scenario B --seconds 25 >"$TMP/tb1.log" 2>&1
+grep -q "infeasible" "$TMP/tb1.log" && ok "an unsatisfiable Scenario B is reported infeasible" \
+  || no "unsatisfiable Scenario B reported infeasible"
+[ ! -f "$TMP/tb1/B/SCHEDULE_ACCESS.csv" ] && ok "nothing is exported for it by default" \
+  || no "nothing exported by default"
+
+"$BUILD/trackaccess" solve --data "$TMP/tight" --out "$TMP/tb2" --scenario B --seconds 25 --fallback >"$TMP/tb2.log" 2>&1
+[ -f "$TMP/tb2/B/SCHEDULE_ACCESS.csv" ] && ok "--fallback does export a plan" || no "--fallback exports a plan"
+[ -f "$TMP/tb2/B/NOT_SUBMISSION_READY.txt" ] && ok "  ... marked NOT_SUBMISSION_READY on disk" \
+  || no "fallback plan is marked on disk"
+grep -q "OUT OF POLICY" "$TMP/tb2.log" && ok "  ... and the run says so loudly" || no "fallback run says so"
+# The whole point: only the scenario POLICY is breached, never a safety rule.
+rules=$(python3 -c "
+import json,collections
+d=json.load(open('$TMP/tb2/B/VALIDATION.json'))
+print(','.join(sorted({v['rule'] for v in d['hard_violations']})))")
+chk "$rules" "planned_date" "  ... and the ONLY breaches are the scenario policy, not any safety rule"
+
 echo "== service: start with token auth =="
 TOKEN=testtoken0123456789abcdef
 "$BUILD/trackaccess-service" --host 127.0.0.1 --port "$PORT" --root "$TMP/var" --web web \

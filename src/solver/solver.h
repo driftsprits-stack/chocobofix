@@ -61,6 +61,15 @@ struct SolveOptions {
   // Disruption: per location-week supply replacing LOCATION_SUPPLY.
   std::vector<SupplyOverride> supply_overrides;
 
+  // Fallback mode. The scenario's POLICY constraint (B's fixed completion dates,
+  // A's zero-excess supply, C's one-excess allowance) becomes a heavily penalised
+  // soft constraint instead of a hard one. Every physical safety rule - closures,
+  // buffers, legal mixes, precedence, planned start weeks, workfronts - stays
+  // hard. A plan produced this way is NOT conforming and must never be presented
+  // as submission-ready; it exists so an operator can see how far out of policy
+  // the instance is, rather than being handed nothing at all.
+  bool soft_scenario_policy = false;
+
   // Repair mode. When `baseline` is set, the search additionally prefers to keep
   // its assignments. This preference is NEVER part of the competition score:
   // SolveResult::score is always the scenario's own objective, recomputed from

@@ -43,6 +43,7 @@ Evidence column names the test or artefact that demonstrates it.
 | C — balanced, ≤1 excess night per location-week | Implemented | feasible, **proven optimal**, objective 26.1 |
 | Distinct outcome states (optimal / feasible / infeasible / timeout / cancelled / invalid input / internal error) | Implemented | `SolveStatus`; a timeout is never reported as infeasibility |
 | Infeasibility attribution | Implemented | `trackaccess diagnose` lifts one rule group at a time and names which binds |
+| Unsatisfiable scenario policy | Implemented | reported infeasible and nothing exported by default; `--fallback` prices the policy instead, keeps every safety rule hard, and marks the output `NOT_SUBMISSION_READY`. A test asserts the only breaches are policy ones. |
 | No strictly redundant access-night | Implemented | the solver forbids an access that could be dropped while still meeting the workload, so no plan squats on a possession slot it does not need |
 
 ## Product and interface (§5)
@@ -111,7 +112,7 @@ Evidence column names the test or artefact that demonstrates it.
 | Mutation tests the checker must reject | Implemented | 9 mutations, each breaking one rule |
 | Metamorphic tests | Partial | Row-order invariance implemented. **ID relabelling invariance is not implemented.** |
 | Official-validator comparison | **Impossible** | The reference validator is not published in the problem repository. Corroboration is against the shipped sample instead, and every report says so. |
-| Integration / end-to-end | Implemented | 57 checks in `tests/integration.sh` |
+| Integration / end-to-end | Implemented | 63 checks in `tests/integration.sh` |
 | Security tests | Implemented | auth, traversal, filename restriction, unknown ids |
 | Concurrency / approval races | Not implemented | No approvals exist to race. |
 | Load and stress | Partial | Measured on the public instance and on synthetic multiples; see `docs/TEST_REPORT.md` |
