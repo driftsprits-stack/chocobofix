@@ -20,7 +20,7 @@ in memory.
 | Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
 | Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
 | Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 90 core + 91 store + 121 integration/security, ASan+UBSan clean |
+| Tests | 120 core + 94 store + 132 integration/security, ASan+UBSan clean |
 | Multi-user | accounts, roles, sessions, plan versions, validation-bound approvals, audit — all through the interface |
 | Hosted deployment | **not deployed** — see [Deployment](#deployment). No URL exists yet. |
 | Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
@@ -114,23 +114,40 @@ to bind anywhere else.
 
 ## Using it
 
-**Project → Import → Generate → Schedule → Network → Check → Repair → Versions →
-Export**, with **Audit** and **Accounts** appearing for the roles that have them.
+The workspace has four places: **Overview, Schedule, Activities, History**, plus
+**Settings**. Creating a plan is a separate four-step flow with named stages:
 
-1. **Project** — create one (planner), then pick an instance or import a new one.
-2. **Import** — drop the eight CSVs, or press *Load public instance*. Every input
-   problem is reported with file, row and field.
-3. **Generate** — pick A, B, C or all three; watch progress; stop if you want.
-4. **Schedule / Network / Check** — the timeline, per-week occupancy against
-   supply, and the conformance report.
-5. **Repair** — apply a disruption and see what it costs before accepting it.
-6. **Versions** — every solve is recorded as an immutable version. An approver
-   signs one off; the approval is bound to the exact plan and validation shown.
-7. **Export** — download the three competition files.
+**Upload → Check → Generate → Review**
 
-Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Text size adjusts
-from the header. Every control is keyboard reachable; no interaction is
-drag-only.
+1. **Upload** — drop the eight CSVs, or press *Try sample project*. Files you have
+   already chosen are kept if a later selection is partial.
+2. **Check** — a plain summary of jobs, contracts and the planning window before
+   any dense table. If the data is wrong, every problem is listed with file, row,
+   field and what to correct; you can replace one file without starting over.
+3. **Generate** — the three scenarios carry plain labels ("Keep existing access
+   limits", "Meet planned completion dates", "Allow limited extra access") with a
+   sentence each, and a panel listing what never changes whichever you pick.
+   Solver settings are behind *Advanced*. There is no progress percentage,
+   because the solver cannot say how far through it is.
+4. **Review** — what happened, in a sentence, before the numbers: whether all
+   work is scheduled, which contracts finish late, and what extra access it cost.
+
+Then **Schedule** is the working area — a timeline where each bar is one night,
+a per-week network view, and a detail panel that answers *"why not another
+week?"* for any job. **Adjust schedule** applies a disruption and shows the
+consequences before anything is accepted. **History** holds every version, who
+made it, who published it, and the activity log.
+
+A version is only *Published* when an approver signs it off, and the approval is
+bound to the exact plan and check result they were shown.
+
+Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Switching language
+keeps you where you are. Text size adjusts from the header. Every control is
+keyboard reachable; no interaction needs colour, hover or dragging alone.
+
+**"Checked" means the plan passed our own rule checker.** It is not official
+certification and not permission to dispatch work. The interface says so on the
+review screen and in Help.
 
 ## Running the solver from the command line
 
@@ -258,10 +275,10 @@ drag-only interaction.
 ## Tests
 
 ```bash
-./build/test_core                    # 90 rule, counterexample and mutation checks
-./build/test_store                   # 91 account, role, approval and concurrency checks
+./build/test_core                    # 120 rule, counterexample and mutation checks
+./build/test_store                   # 94 account, role, approval and concurrency checks
 ./build/check_sample                 # our checker must accept the upstream sample
-./tests/integration.sh build         # 121 end-to-end, API and security checks
+./tests/integration.sh build         # 132 end-to-end, API and security checks
 python3 tests/test_multiuser.py      # the shared-project suite on its own
 ctest --test-dir build               # runs the three C++ suites under CTest
 ```
@@ -287,7 +304,7 @@ ctest --test-dir build               # runs the three C++ suites under CTest
 | Accounts, roles, sessions, project isolation | tested |
 | Plan versions, validation-bound approvals, revocation, invalidation | tested |
 | Optimistic concurrency, audit trail | tested |
-| Four-language interface | strings complete; **ms/zh/ta unreviewed by a fluent speaker** |
+| Four-language interface | 302 strings x 4 languages, none missing; **ms/zh/ta unreviewed by a fluent speaker** |
 | TLS-terminated hosted shape | tested locally with a throwaway certificate; **not deployed** |
 | Backup / restore | procedure written; **restore never rehearsed** |
 | CI | **none configured** |

@@ -3,323 +3,172 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TrackAccess — Railway Track Access Planner</title>
+<title>TrackAccess — railway possession planning</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<header class="top">
-  <div class="brand">TrackAccess<small data-i18n="brand_sub">Line Alpha / Line Beta possession planner</small></div>
-  <div class="spacer"></div>
-  <div class="meta" id="instMeta"><span data-i18n="no_instance">No instance loaded</span></div>
-  <div class="meta" id="userChip"></div>
-  <label class="sr" for="langSel">Language</label>
-  <select id="langSel" title="Language">
-    <option value="en">English</option>
-    <option value="ms">Bahasa Melayu</option>
-    <option value="zh">简体中文</option>
-    <option value="ta">தமிழ்</option>
-  </select>
-  <label class="sr" for="sizeSel">Text size</label>
-  <select id="sizeSel" title="Text size">
-    <option value="13">A−</option><option value="14" selected>A</option>
-    <option value="16">A+</option><option value="18">A++</option>
-  </select>
-</header>
 
-<nav class="tabs" role="tablist" id="tabs">
-  <button role="tab" data-tab="projects" aria-selected="true" data-i18n="tab_projects">1 · Project</button>
-  <button role="tab" data-tab="import"  aria-selected="false" data-i18n="tab_import" disabled>2 · Import</button>
-  <button role="tab" data-tab="solve"   aria-selected="false" data-i18n="tab_solve"   disabled>3 · Generate</button>
-  <button role="tab" data-tab="schedule"aria-selected="false" data-i18n="tab_schedule" disabled>4 · Schedule</button>
-  <button role="tab" data-tab="network" aria-selected="false" data-i18n="tab_network" disabled>5 · Network</button>
-  <button role="tab" data-tab="check"   aria-selected="false" data-i18n="tab_check"   disabled>6 · Check</button>
-  <button role="tab" data-tab="repair"  aria-selected="false" data-i18n="tab_repair"  disabled>7 · Repair</button>
-  <button role="tab" data-tab="versions"aria-selected="false" data-i18n="tab_versions" disabled>8 · Versions</button>
-  <button role="tab" data-tab="export"  aria-selected="false" data-i18n="tab_export"  disabled>9 · Export</button>
-  <button role="tab" data-tab="audit"   aria-selected="false" data-i18n="tab_audit" class="hide">Audit</button>
-  <button role="tab" data-tab="users"   aria-selected="false" data-i18n="tab_users" class="hide">Accounts</button>
-</nav>
+<!-- ======================================================== SIGN IN ===== -->
+<div id="signin" class="signin hide">
+  <!-- Original artwork: an empty platform before the first train. Architectural
+       geometry, pale concrete, long cool shadows, and a lot of negative space.
+       No characters, no logos, no lettering. -->
+  <div class="art" aria-hidden="true">
+    <svg viewBox="0 0 800 1000" preserveAspectRatio="xMidYMid slice" role="presentation">
+      <defs>
+        <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%"  stop-color="#eef1ef"/>
+          <stop offset="60%" stop-color="#e4e9e7"/>
+          <stop offset="100%" stop-color="#dbe1df"/>
+        </linearGradient>
+        <linearGradient id="shadow" x1="0" y1="0" x2="1" y2="0">
+          <stop offset="0%"   stop-color="#c9d1cf" stop-opacity=".75"/>
+          <stop offset="100%" stop-color="#c9d1cf" stop-opacity="0"/>
+        </linearGradient>
+        <linearGradient id="rail" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#b9c2c0"/>
+          <stop offset="100%" stop-color="#9aa5a3"/>
+        </linearGradient>
+      </defs>
 
-<!-- SIGN IN -->
-<div id="gate" class="wrap hide">
-  <div class="panel" style="max-width:420px;margin:40px auto">
-    <h2 id="gateTitle" data-i18n="signin">Sign in</h2>
-    <div class="body">
-      <p class="note" id="gateHelp" data-i18n="signin_help">This deployment keeps each project and its uploaded data to the people who should see it.</p>
-      <div style="display:grid;gap:6px;margin-top:8px">
-        <label for="gu" data-i18n="username">Username</label>
-        <input type="text" id="gu" autocomplete="username">
-        <label for="gp" data-i18n="password">Password</label>
-        <input type="password" id="gp" autocomplete="current-password">
-      </div>
-      <div class="row" style="margin-top:10px">
-        <button class="btn primary" id="gateGo" data-i18n="signin">Sign in</button>
-        <span id="gateMsg"></span>
+      <rect width="800" height="1000" fill="url(#sky)"/>
+
+      <!-- far wall, with the rhythm of a station's bays -->
+      <rect x="0" y="120" width="800" height="300" fill="#e8ecea"/>
+      <g fill="#e1e6e4">
+        <rect x="40"  y="170" width="92" height="210"/>
+        <rect x="192" y="170" width="92" height="210"/>
+        <rect x="344" y="170" width="92" height="210"/>
+        <rect x="496" y="170" width="92" height="210"/>
+        <rect x="648" y="170" width="92" height="210"/>
+      </g>
+      <rect x="0" y="118" width="800" height="3" fill="#d3d9d7"/>
+
+      <!-- canopy, seen from beneath -->
+      <path d="M0 60 L800 60 L800 118 L0 96 Z" fill="#dfe4e2"/>
+      <g stroke="#d0d6d4" stroke-width="1">
+        <line x1="0" y1="78" x2="800" y2="86"/>
+        <line x1="0" y1="88" x2="800" y2="102"/>
+      </g>
+
+      <!-- columns and the long shadows they throw across the platform -->
+      <g>
+        <rect x="128" y="96"  width="13" height="330" fill="#d6dcda"/>
+        <rect x="388" y="100" width="13" height="326" fill="#d6dcda"/>
+        <rect x="648" y="104" width="13" height="322" fill="#d6dcda"/>
+        <path d="M141 426 L300 500 L268 500 L141 444 Z" fill="url(#shadow)"/>
+        <path d="M401 426 L560 500 L528 500 L401 444 Z" fill="url(#shadow)"/>
+        <path d="M661 426 L800 496 L788 500 L661 444 Z" fill="url(#shadow)"/>
+      </g>
+
+      <!-- platform deck -->
+      <rect x="0" y="420" width="800" height="250" fill="#e6eae8"/>
+      <rect x="0" y="420" width="800" height="2"  fill="#d2d8d6"/>
+      <!-- tactile edge strip -->
+      <rect x="0" y="628" width="800" height="26" fill="#dce2e0"/>
+      <g fill="#cdd5d3">
+        <circle cx="30"  cy="641" r="3.2"/><circle cx="74"  cy="641" r="3.2"/>
+        <circle cx="118" cy="641" r="3.2"/><circle cx="162" cy="641" r="3.2"/>
+        <circle cx="206" cy="641" r="3.2"/><circle cx="250" cy="641" r="3.2"/>
+        <circle cx="294" cy="641" r="3.2"/><circle cx="338" cy="641" r="3.2"/>
+        <circle cx="382" cy="641" r="3.2"/><circle cx="426" cy="641" r="3.2"/>
+        <circle cx="470" cy="641" r="3.2"/><circle cx="514" cy="641" r="3.2"/>
+        <circle cx="558" cy="641" r="3.2"/><circle cx="602" cy="641" r="3.2"/>
+        <circle cx="646" cy="641" r="3.2"/><circle cx="690" cy="641" r="3.2"/>
+        <circle cx="734" cy="641" r="3.2"/><circle cx="778" cy="641" r="3.2"/>
+      </g>
+      <rect x="0" y="654" width="800" height="5" fill="#c6cfcd"/>
+
+      <!-- trackbed, and the rails running out past the frame -->
+      <rect x="0" y="659" width="800" height="341" fill="#d7dcda"/>
+      <g opacity=".5" fill="#c3cbc9">
+        <rect x="0" y="700" width="800" height="7"/>
+        <rect x="0" y="760" width="800" height="7"/>
+        <rect x="0" y="820" width="800" height="7"/>
+        <rect x="0" y="880" width="800" height="7"/>
+        <rect x="0" y="940" width="800" height="7"/>
+      </g>
+      <rect x="0" y="742" width="800" height="9"  fill="url(#rail)"/>
+      <rect x="0" y="868" width="800" height="10" fill="url(#rail)"/>
+
+      <!-- a single signal, unlit -->
+      <rect x="712" y="470" width="5" height="160" fill="#cdd5d3"/>
+      <rect x="702" y="446" width="25" height="46" rx="5" fill="#dbe1df" stroke="#c7cfcd"/>
+      <circle cx="714.5" cy="459" r="6" fill="#cfd6d4"/>
+      <circle cx="714.5" cy="477" r="6" fill="#cfd6d4"/>
+    </svg>
+  </div>
+
+  <div class="panel">
+    <div class="inner">
+      <h1>TrackAccess</h1>
+      <p class="lede" data-i18n="signin_lede">Plan which work gets the track, on which nights — and check the answer before anyone acts on it.</p>
+
+      <form id="signinForm" novalidate>
+        <div class="field">
+          <label for="su" data-i18n="username">Username</label>
+          <input type="text" id="su" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+        </div>
+        <div class="field">
+          <label for="sp" data-i18n="password">Password</label>
+          <input type="password" id="sp" autocomplete="current-password" required>
+        </div>
+        <div id="signinMsg" role="alert" aria-live="polite"></div>
+        <div class="row" style="margin-top:16px">
+          <button type="submit" class="btn btn-primary" id="signinGo" data-i18n="signin">Sign in</button>
+          <button type="button" class="btn" id="trySample" data-i18n="try_sample">Try sample project</button>
+        </div>
+      </form>
+
+      <div class="foot">
+        <div class="row tight" style="justify-content:space-between">
+          <span>
+            <label for="langSignin" class="sr-only">Language</label>
+            <select id="langSignin" class="lang-select"></select>
+          </span>
+          <button type="button" class="btn-quiet btn btn-sm" id="signinHelp" data-i18n="help">Help</button>
+        </div>
+        <p class="small" style="margin:12px 0 0" id="signinNote" data-i18n="signin_note">Accounts are created by an administrator. There is no self-registration, and no password is ever sent by email.</p>
       </div>
     </div>
   </div>
 </div>
 
-<main class="wrap" id="app">
+<!-- ======================================================== APP ========= -->
+<div id="app" class="app hide">
+  <header class="topbar">
+    <div class="brand">
+      <span class="name">TrackAccess</span>
+    </div>
+    <div class="context" id="ctx"></div>
+    <div class="spacer"></div>
+    <label for="langSel" class="sr-only">Language</label>
+    <select id="langSel" class="lang-select" style="width:auto"></select>
+    <label for="sizeSel" class="sr-only">Text size</label>
+    <select id="sizeSel" style="width:auto">
+      <option value="14">A−</option><option value="15" selected>A</option>
+      <option value="17">A+</option><option value="19">A++</option>
+    </select>
+    <button class="btn btn-sm" id="helpBtn" data-i18n="help">Help</button>
+    <button class="btn btn-sm" id="acctBtn" aria-haspopup="menu" aria-expanded="false"></button>
+  </header>
 
-<!-- 1 PROJECTS -->
-<section id="p-projects" class="grid g2">
-  <div class="panel">
-    <h2 data-i18n="prj_title">Projects</h2>
-    <div class="body tight">
-      <div class="scroll"><table id="prjTable">
-        <thead><tr><th data-i18n="c_project">Project</th><th data-i18n="c_owner">Owner</th>
-          <th class="num" data-i18n="c_rev">Rev</th><th data-i18n="c_created">Created</th></tr></thead>
-        <tbody></tbody></table></div>
-      <div class="body row" id="prjNewRow">
-        <input type="text" id="prjName" placeholder="New project name" style="flex:1;max-width:260px">
-        <button class="btn primary" id="prjCreate" data-i18n="prj_create">Create project</button>
-        <span id="prjMsg"></span>
-      </div>
-    </div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="prj_instances">Instances in this project</h2>
-    <div class="body tight">
-      <div class="scroll"><table id="instTable">
-        <thead><tr><th data-i18n="c_inst">Instance</th><th data-i18n="c_hash">Input hash</th>
-          <th data-i18n="c_by">Uploaded by</th><th data-i18n="c_created">Created</th></tr></thead>
-        <tbody></tbody></table></div>
-      <p class="note body" data-i18n="prj_pick">Select a project on the left, then choose an instance or import a new one.</p>
-    </div>
-  </div>
-</section>
+  <nav class="nav" id="nav" aria-label="Sections">
+    <button data-view="projects"   data-i18n="nav_projects">Projects</button>
+    <button data-view="overview"   data-i18n="nav_overview" disabled>Overview</button>
+    <button data-view="schedule"   data-i18n="nav_schedule" disabled>Schedule</button>
+    <button data-view="activities" data-i18n="nav_activities" disabled>Activities</button>
+    <button data-view="history"    data-i18n="nav_history" disabled>History</button>
+    <button data-view="settings"   data-i18n="nav_settings">Settings</button>
+  </nav>
 
-<!-- 1 IMPORT -->
-<section id="p-import" class="hide grid g2">
-  <div class="panel">
-    <h2 data-i18n="imp_title">Instance files</h2>
-    <div class="body">
-      <p class="note" data-i18n="imp_help">Select or drop all eight instance CSV files. Nothing is sent until every file is present.</p>
-      <div class="drop" id="drop" tabindex="0" role="button" aria-describedby="fl">
-        <span data-i18n="imp_drop">Drop the eight CSV files here, or</span>
-        <button class="btn" id="pick" data-i18n="imp_pick">Choose files…</button>
-        <input type="file" id="files" multiple accept=".csv" class="hide">
-      </div>
-      <div class="filelist" id="fl"></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn primary" id="upload" disabled data-i18n="imp_upload">Validate and load</button>
-        <button class="btn" id="demo" data-i18n="imp_demo">Load public instance</button>
-        <span id="impStatus"></span>
-      </div>
-    </div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="imp_result">Validation</h2>
-    <div class="body tight">
-      <div id="impOk" class="body hide"><dl class="kv" id="impSummary"></dl></div>
-      <div class="scroll"><table id="impErrTable" class="hide">
-        <thead><tr><th data-i18n="c_file">File</th><th class="num" data-i18n="c_row">Row</th>
-          <th data-i18n="c_field">Field</th><th data-i18n="c_problem">Problem</th></tr></thead>
-        <tbody></tbody></table></div>
-      <p class="note body" id="impIdle" data-i18n="imp_idle">Validation results appear here, with the file, row and field of each problem.</p>
-    </div>
-  </div>
-</section>
+  <main class="main" id="main">
+    <div id="view" aria-live="polite"></div>
+  </main>
+</div>
 
-<!-- 2 SOLVE -->
-<section id="p-solve" class="hide grid g2">
-  <div class="panel">
-    <h2 data-i18n="sol_title">Scenario</h2>
-    <div class="body">
-      <div class="row">
-        <label for="scen" data-i18n="sol_pick">Policy</label>
-        <select id="scen">
-          <option value="all">A + B + C</option>
-          <option value="A">A</option><option value="B">B</option><option value="C">C</option>
-        </select>
-        <label for="secs" data-i18n="sol_budget">Time budget</label>
-        <input type="number" id="secs" value="60" min="1" max="120" style="width:72px">
-        <span class="unit">s</span>
-      </div>
-      <p class="note" id="scenHelp"></p>
-      <div class="row" style="margin-top:8px">
-        <button class="btn primary" id="run" data-i18n="sol_run">Generate schedule</button>
-        <button class="btn" id="cancel" disabled data-i18n="sol_cancel">Stop</button>
-        <span id="jobChip"></span>
-      </div>
-      <p class="note" data-i18n="sol_note">The solve runs in a separate worker process with its own memory and CPU limits. Stopping keeps the best complete plan already found.</p>
-    </div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="sol_log">Solver progress</h2>
-    <div class="body tight"><pre class="log" id="log"></pre></div>
-  </div>
-</section>
+<div id="dialogHost"></div>
 
-<!-- 3 SCHEDULE -->
-<section id="p-schedule" class="hide">
-  <div class="grid g3" style="margin-bottom:10px" id="scoreCards"></div>
-  <div class="grid g2">
-    <div class="panel">
-      <h2 data-i18n="sch_contracts">Contract completion</h2>
-      <div class="body tight"><div class="scroll"><table id="conTable">
-        <thead><tr><th data-i18n="c_contract">Contract</th><th data-i18n="c_pri">Pri</th>
-          <th data-i18n="c_planned">Planned</th><th data-i18n="c_sim">Simulated</th>
-          <th class="num" data-i18n="c_over">Overrun</th></tr></thead><tbody></tbody></table></div></div>
-    </div>
-    <div class="panel">
-      <h2 data-i18n="sch_timeline">Activity timeline</h2>
-      <div class="body">
-        <div class="legend" style="margin-bottom:5px">
-          <span><i></i><span data-i18n="lg_std">standard night</span></span>
-          <span><i class="eclo"></i><span data-i18n="lg_eclo">ECLO night</span></span>
-          <span><i class="late"></i><span data-i18n="lg_late">after planned date</span></span>
-        </div>
-        <div class="gantt" id="gantt"></div>
-      </div>
-    </div>
-  </div>
-  <div class="panel" style="margin-top:10px">
-    <h2 data-i18n="sch_detail">Activity detail</h2>
-    <div class="body tight">
-      <div class="grid g2">
-        <div class="scroll"><table id="actTable">
-          <thead><tr><th data-i18n="c_act">Activity</th><th data-i18n="c_contract">Contract</th>
-            <th class="num" data-i18n="c_need">Need</th><th class="num" data-i18n="c_got">Nights</th>
-            <th data-i18n="c_weeks">Weeks</th></tr></thead><tbody></tbody></table></div>
-        <div class="body" id="actDetail"><p class="note" data-i18n="sch_pick">Select an activity to see the locations it books, its buffer, and its dependencies.</p></div>
-      </div>
-    </div>
-  </div>
-</section>
-
-<!-- 4 NETWORK -->
-<section id="p-network" class="hide">
-  <div class="panel">
-    <h2 data-i18n="net_title">Network occupancy</h2>
-    <div class="body">
-      <div class="row">
-        <label for="wk" data-i18n="net_week">Week</label>
-        <input type="range" id="wk" min="1" max="30" value="1" style="flex:1;max-width:460px">
-        <span id="wkLabel" class="meta"></span>
-      </div>
-      <div id="netSvg"></div>
-      <p class="note" data-i18n="net_help">Thickness shows access-nights used against that location's weekly supply. Red marks a location at or beyond supply.</p>
-    </div>
-  </div>
-</section>
-
-<!-- 5 CHECK -->
-<section id="p-check" class="hide grid g2">
-  <div class="panel">
-    <h2 data-i18n="chk_title">Independent check</h2>
-    <div class="body" id="chkBody"></div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="chk_report">Report</h2>
-    <div class="body tight"><pre class="log" id="chkJson" style="max-height:440px"></pre></div>
-  </div>
-</section>
-
-<!-- 6 REPAIR -->
-<section id="p-repair" class="hide grid g2">
-  <div class="panel">
-    <h2 data-i18n="rep_title">Disruption</h2>
-    <div class="body">
-      <p class="note" data-i18n="rep_help">Urgent maintenance takes nights away from a location. Set the supply that is actually left, then re-plan. Committed work that is unaffected is kept where possible.</p>
-      <div class="row">
-        <label for="repLoc" data-i18n="rep_loc">Location</label>
-        <select id="repLoc" style="max-width:260px"></select>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <label for="repFrom" data-i18n="rep_weeks">Weeks</label>
-        <input type="number" id="repFrom" min="1" value="15" style="width:64px">
-        <span>–</span>
-        <input type="number" id="repTo" min="1" value="16" style="width:64px">
-        <label for="repSup" data-i18n="rep_supply">Nights left</label>
-        <input type="number" id="repSup" min="0" value="0" style="width:64px">
-        <button class="btn" id="repAdd" data-i18n="rep_add">Add</button>
-      </div>
-      <div class="filelist" id="repList"></div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn primary" id="repRun" data-i18n="rep_run">Re-plan</button>
-        <button class="btn" id="repClear" data-i18n="rep_clear">Clear</button>
-        <span id="repChip"></span>
-      </div>
-    </div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="rep_result">Consequences</h2>
-    <div class="body tight"><pre class="log" id="repOut" style="max-height:440px"></pre></div>
-  </div>
-</section>
-
-<!-- 8 VERSIONS -->
-<section id="p-versions" class="hide">
-  <div class="panel">
-    <h2 data-i18n="ver_title">Plan versions</h2>
-    <div class="body tight">
-      <div class="scroll"><table id="verTable">
-        <thead><tr><th data-i18n="c_ver">Version</th><th data-i18n="c_scenario">Scenario</th>
-          <th data-i18n="c_state">State</th><th class="num" data-i18n="c_obj">Objective</th>
-          <th data-i18n="c_by">Created by</th><th data-i18n="c_created">Created</th>
-          <th data-i18n="c_action">Action</th></tr></thead><tbody></tbody></table></div>
-      <p class="note body" data-i18n="ver_help">A version is immutable. Approval is bound to the exact plan and validation result shown here; if either changes, the approval does not carry over.</p>
-    </div>
-  </div>
-</section>
-
-<!-- AUDIT -->
-<section id="p-audit" class="hide">
-  <div class="panel">
-    <h2 data-i18n="aud_title">Audit history</h2>
-    <div class="body tight">
-      <div class="scroll" style="max-height:600px"><table id="audTable">
-        <thead><tr><th data-i18n="c_when">When</th><th data-i18n="c_actor">Actor</th>
-          <th data-i18n="c_action2">Action</th><th data-i18n="c_object">Object</th>
-          <th data-i18n="c_result">Result</th><th data-i18n="c_detail">Detail</th></tr></thead>
-        <tbody></tbody></table></div>
-    </div>
-  </div>
-</section>
-
-<!-- USERS -->
-<section id="p-users" class="hide grid g2">
-  <div class="panel">
-    <h2 data-i18n="usr_title">Accounts</h2>
-    <div class="body tight"><div class="scroll"><table id="usrTable">
-      <thead><tr><th data-i18n="c_user">Username</th><th data-i18n="c_role">Role</th>
-        <th data-i18n="c_state">State</th><th data-i18n="c_action">Action</th></tr></thead>
-      <tbody></tbody></table></div></div>
-  </div>
-  <div class="panel">
-    <h2 data-i18n="usr_new">Add an account</h2>
-    <div class="body">
-      <div style="display:grid;gap:6px">
-        <label for="nu" data-i18n="username">Username</label><input type="text" id="nu">
-        <label for="np" data-i18n="password">Password</label><input type="password" id="np">
-        <label for="nr" data-i18n="c_role">Role</label>
-        <select id="nr">
-          <option value="planner">planner</option>
-          <option value="approver">approver</option>
-          <option value="viewer">viewer</option>
-          <option value="administrator">administrator</option>
-        </select>
-      </div>
-      <div class="row" style="margin-top:8px">
-        <button class="btn primary" id="usrCreate" data-i18n="usr_add">Create</button>
-        <span id="usrMsg"></span>
-      </div>
-      <p class="note" data-i18n="usr_note">An administrator manages accounts but cannot approve a plan, and an approver cannot create one. Those duties are separated on purpose.</p>
-    </div>
-  </div>
-</section>
-
-<!-- 9 EXPORT -->
-<section id="p-export" class="hide">
-  <div class="panel">
-    <h2 data-i18n="exp_title">Competition files</h2>
-    <div class="body" id="expBody"></div>
-  </div>
-</section>
-
-</main>
 <script src="i18n.js"></script>
 <script src="app.js"></script>
 </body>

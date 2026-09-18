@@ -46,6 +46,24 @@ Evidence column names the test or artefact that demonstrates it.
 | Unsatisfiable scenario policy | Implemented | reported infeasible and nothing exported by default; `--fallback` prices the policy instead, keeps every safety rule hard, and marks the output `NOT_SUBMISSION_READY`. A test asserts the only breaches are policy ones. |
 | No strictly redundant access-night | Implemented | the solver forbids an access that could be dropped while still meeting the workload, so no plan squats on a possession slot it does not need |
 
+## Interface and first-use journey
+
+| Requirement | Status | Note |
+| --- | --- | --- |
+| Named stages, one task per screen, Back, saved progress | **Implemented** | Upload → Check → Generate → Review. Chosen files survive a partial reselection; a failed check keeps the good files. |
+| Plain language throughout | **Implemented** | "Try sample project", "Check files and continue", "Adjust schedule", "Expected finish date", "Project data". Solver, worker and CP-SAT detail sits behind *Show technical details*. |
+| Stable navigation: Overview / Schedule / Activities / History | **Implemented** | Plus Settings and Help; administrative settings are out of a viewer's way. |
+| Truthful progress, no invented percentage | **Implemented** | Only server-reported states are shown, with a sentence saying why there is no percentage. |
+| Result explained before dense tables | **Implemented** | Review leads with what happened, then metrics, then the late-contract table. |
+| Current project, scenario, version and state always visible | **Implemented** | In the top bar: Draft / Checked / Published / Out of date. |
+| "Checked" ≠ certification | **Implemented** | Stated on the review screen, in Help, and in every validation report. |
+| Login artwork | **Implemented** | Original SVG of an empty platform. No copyrighted characters, logos, screenshots or decorative lettering. |
+| Frosted glass with solid fallback | **Implemented** | One surface only (the top bar); `@supports` fallback, and it is dropped under `prefers-reduced-transparency`. |
+| Reduced motion | **Implemented** | Transitions are declared only inside `prefers-reduced-motion: no-preference`. |
+| Language switching preserves the task | **Implemented** | Re-renders the current view in place. |
+| Laptop and smaller widths | **Partial** | Verified at 1440 and 1024 px, including Tamil. Phone widths are not designed for. |
+| Screen-reader semantics | **Partial** | Landmarks, `aria-current`, live regions, focusable rows and dialog labelling are in place; **not tested with an actual screen reader.** |
+
 ## Product and interface (§5)
 
 | Requirement | Status | Note |
@@ -115,11 +133,11 @@ Evidence column names the test or artefact that demonstrates it.
 
 | | Status | Evidence |
 | --- | --- | --- |
-| Unit tests for critical rules | Implemented | 90 checks in `test_core`, including rule-6 counterexamples on a purpose-built micro instance |
+| Unit tests for critical rules | Implemented | 120 checks in `test_core`: rule-6 counterexamples on a purpose-built micro instance, plus one regression per reviewed risk |
 | Mutation tests the checker must reject | Implemented | 9 mutations, each breaking one rule |
 | Metamorphic tests | Partial | Row-order invariance implemented. **ID relabelling invariance is not implemented.** |
 | Official-validator comparison | **Impossible** | The reference validator is not published in the problem repository. Corroboration is against the shipped sample instead, and every report says so. |
-| Integration / end-to-end | Implemented | 121 checks in `tests/integration.sh`, which includes a 59-check HTTP suite driving exactly what the interface calls |
+| Integration / end-to-end | Implemented | 132 checks in `tests/integration.sh`, which includes a 59-check HTTP suite driving exactly what the interface calls |
 | Security tests | Implemented | auth, sessions, role matrix, project isolation, traversal, filename restriction, unknown ids, malformed uploads |
 | Concurrency / approval races | **Implemented** | Store tests cover a second approver losing cleanly, stale-revision rejection, and supersession. |
 | Load and stress | Partial | Measured on the public instance and on synthetic multiples; see `docs/TEST_REPORT.md` |
