@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TrackAccess — Railway Track Access Planner</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">TrackAccess<small data-i18n="brand_sub">Line Alpha / Line Beta possession planner</small></div>
+  <div class="spacer"></div>
+  <div class="meta" id="instMeta"><span data-i18n="no_instance">No instance loaded</span></div>
+  <label class="sr" for="langSel">Language</label>
+  <select id="langSel" title="Language">
+    <option value="en">English</option>
+    <option value="ms">Bahasa Melayu</option>
+    <option value="zh">简体中文</option>
+    <option value="ta">தமிழ்</option>
+  </select>
+  <label class="sr" for="sizeSel">Text size</label>
+  <select id="sizeSel" title="Text size">
+    <option value="13">A−</option><option value="14" selected>A</option>
+    <option value="16">A+</option><option value="18">A++</option>
+  </select>
+</header>
+
+<nav class="tabs" role="tablist" id="tabs">
+  <button role="tab" data-tab="import"  aria-selected="true"  data-i18n="tab_import">1 · Import</button>
+  <button role="tab" data-tab="solve"   aria-selected="false" data-i18n="tab_solve"   disabled>2 · Generate</button>
+  <button role="tab" data-tab="schedule"aria-selected="false" data-i18n="tab_schedule" disabled>3 · Schedule</button>
+  <button role="tab" data-tab="network" aria-selected="false" data-i18n="tab_network" disabled>4 · Network</button>
+  <button role="tab" data-tab="check"   aria-selected="false" data-i18n="tab_check"   disabled>5 · Check</button>
+  <button role="tab" data-tab="export"  aria-selected="false" data-i18n="tab_export"  disabled>6 · Export</button>
+</nav>
+
+<main class="wrap">
+
+<!-- 1 IMPORT -->
+<section id="p-import" class="grid g2">
+  <div class="panel">
+    <h2 data-i18n="imp_title">Instance files</h2>
+    <div class="body">
+      <p class="note" data-i18n="imp_help">Select or drop all eight instance CSV files. Nothing is sent until every file is present.</p>
+      <div class="drop" id="drop" tabindex="0" role="button" aria-describedby="fl">
+        <span data-i18n="imp_drop">Drop the eight CSV files here, or</span>
+        <button class="btn" id="pick" data-i18n="imp_pick">Choose files…</button>
+        <input type="file" id="files" multiple accept=".csv" class="hide">
+      </div>
+      <div class="filelist" id="fl"></div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="upload" disabled data-i18n="imp_upload">Validate and load</button>
+        <button class="btn" id="demo" data-i18n="imp_demo">Load public instance</button>
+        <span id="impStatus"></span>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2 data-i18n="imp_result">Validation</h2>
+    <div class="body tight">
+      <div id="impOk" class="body hide"><dl class="kv" id="impSummary"></dl></div>
+      <div class="scroll"><table id="impErrTable" class="hide">
+        <thead><tr><th data-i18n="c_file">File</th><th class="num" data-i18n="c_row">Row</th>
+          <th data-i18n="c_field">Field</th><th data-i18n="c_problem">Problem</th></tr></thead>
+        <tbody></tbody></table></div>
+      <p class="note body" id="impIdle" data-i18n="imp_idle">Validation results appear here, with the file, row and field of each problem.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 2 SOLVE -->
+<section id="p-solve" class="hide grid g2">
+  <div class="panel">
+    <h2 data-i18n="sol_title">Scenario</h2>
+    <div class="body">
+      <div class="row">
+        <label for="scen" data-i18n="sol_pick">Policy</label>
+        <select id="scen">
+          <option value="all">A + B + C</option>
+          <option value="A">A</option><option value="B">B</option><option value="C">C</option>
+        </select>
+        <label for="secs" data-i18n="sol_budget">Time budget</label>
+        <input type="number" id="secs" value="60" min="1" max="120" style="width:72px">
+        <span class="unit">s</span>
+      </div>
+      <p class="note" id="scenHelp"></p>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="run" data-i18n="sol_run">Generate schedule</button>
+        <button class="btn" id="cancel" disabled data-i18n="sol_cancel">Stop</button>
+        <span id="jobChip"></span>
+      </div>
+      <p class="note" data-i18n="sol_note">The solve runs in a separate worker process with its own memory and CPU limits. Stopping keeps the best complete plan already found.</p>
+    </div>
+  </div>
+  <div class="panel">
+    <h2 data-i18n="sol_log">Solver progress</h2>
+    <div class="body tight"><pre class="log" id="log"></pre></div>
+  </div>
+</section>
+
+<!-- 3 SCHEDULE -->
+<section id="p-schedule" class="hide">
+  <div class="grid g3" style="margin-bottom:10px" id="scoreCards"></div>
+  <div class="grid g2">
+    <div class="panel">
+      <h2 data-i18n="sch_contracts">Contract completion</h2>
+      <div class="body tight"><div class="scroll"><table id="conTable">
+        <thead><tr><th data-i18n="c_contract">Contract</th><th data-i18n="c_pri">Pri</th>
+          <th data-i18n="c_planned">Planned</th><th data-i18n="c_sim">Simulated</th>
+          <th class="num" data-i18n="c_over">Overrun</th></tr></thead><tbody></tbody></table></div></div>
+    </div>
+    <div class="panel">
+      <h2 data-i18n="sch_timeline">Activity timeline</h2>
+      <div class="body">
+        <div class="legend" style="margin-bottom:5px">
+          <span><i></i><span data-i18n="lg_std">standard night</span></span>
+          <span><i class="eclo"></i><span data-i18n="lg_eclo">ECLO night</span></span>
+          <span><i class="late"></i><span data-i18n="lg_late">after planned date</span></span>
+        </div>
+        <div class="gantt" id="gantt"></div>
+      </div>
+    </div>
+  </div>
+  <div class="panel" style="margin-top:10px">
+    <h2 data-i18n="sch_detail">Activity detail</h2>
+    <div class="body tight">
+      <div class="grid g2">
+        <div class="scroll"><table id="actTable">
+          <thead><tr><th data-i18n="c_act">Activity</th><th data-i18n="c_contract">Contract</th>
+            <th class="num" data-i18n="c_need">Need</th><th class="num" data-i18n="c_got">Nights</th>
+            <th data-i18n="c_weeks">Weeks</th></tr></thead><tbody></tbody></table></div>
+        <div class="body" id="actDetail"><p class="note" data-i18n="sch_pick">Select an activity to see the locations it books, its buffer, and its dependencies.</p></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 4 NETWORK -->
+<section id="p-network" class="hide">
+  <div class="panel">
+    <h2 data-i18n="net_title">Network occupancy</h2>
+    <div class="body">
+      <div class="row">
+        <label for="wk" data-i18n="net_week">Week</label>
+        <input type="range" id="wk" min="1" max="30" value="1" style="flex:1;max-width:460px">
+        <span id="wkLabel" class="meta"></span>
+      </div>
+      <div id="netSvg"></div>
+      <p class="note" data-i18n="net_help">Thickness shows access-nights used against that location's weekly supply. Red marks a location at or beyond supply.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 5 CHECK -->
+<section id="p-check" class="hide grid g2">
+  <div class="panel">
+    <h2 data-i18n="chk_title">Independent check</h2>
+    <div class="body" id="chkBody"></div>
+  </div>
+  <div class="panel">
+    <h2 data-i18n="chk_report">Report</h2>
+    <div class="body tight"><pre class="log" id="chkJson" style="max-height:440px"></pre></div>
+  </div>
+</section>
+
+<!-- 6 EXPORT -->
+<section id="p-export" class="hide">
+  <div class="panel">
+    <h2 data-i18n="exp_title">Competition files</h2>
+    <div class="body" id="expBody"></div>
+  </div>
+</section>
+
+</main>
+<script src="i18n.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

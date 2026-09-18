@@ -1,0 +1,7 @@
+build/
+build-*/
+var/
+third_party/or-tools_*/
+third_party/httplib.h
+*.tmp
+.DS_Store

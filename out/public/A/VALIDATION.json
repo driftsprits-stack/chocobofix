@@ -1,0 +1,20 @@
+{
+  "scenario": "A",
+  "feasible": true,
+  "checker": "trackaccess-check/0.1",
+  "checker_is_official_validator": false,
+  "input_hash": "52af39d328d856b597dab64b3e51e6ac40969c2aedd6a9888deed2f896f95e96",
+  "hard_violations": [],
+  "soft_scores": {
+    "overrun_days_total": 28,
+    "contracts_overrunning": 3,
+    "earliness_days_total": 119,
+    "excess_access_nights_total": 0,
+    "eclo_nights_total": 0,
+    "priority_overrun": {"1": 0, "2": 0, "3": 28},
+    "priority_weighted_score": 32.2,
+    "objective_score": 32.2,
+    "formula_version": "PS1-README@966c976"
+  },
+  "detail": {"nights_scheduled": 192, "eclo_nights": 0, "capacity_hotspots": 153}
+}
