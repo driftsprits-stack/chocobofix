@@ -82,8 +82,10 @@ permits (93.8) — so the sample cannot have been produced under it. That is
 strong, but it rests on the sample being current, so R6c is labelled **adopted,
 contested**, not settled.
 
-Our default outputs breach the literal reading 23 / 42 / 34 times (A / B / C);
-the sample breaches it 24 times. `--strict-buffers` produces plans clean under
+Our default outputs breach the literal reading roughly 23 / 42 / 31 times
+(A / B / C) — approximate, because several plans share the same optimal
+objective and they do not all expose identically. The sample breaches it 24
+times. Re-run `tools/derive/exposure.py` rather than trusting those figures. `--strict-buffers` produces plans clean under
 **both** readings at 2.3×–3.4× the objective, and `out/public-strict/` holds
 them. Measure any submission with:
 

@@ -177,10 +177,15 @@ another activity's worksite in the same week:
 | Submission | breaches, adopted reading | breaches, literal reading |
 | --- | --- | --- |
 | shipped sample | 0 | 24 |
-| ours, Scenario A | 0 | 23 |
-| ours, Scenario B | 0 | 42 |
-| ours, Scenario C | 0 | 34 |
+| ours, Scenario A | 0 | ~23 |
+| ours, Scenario B | 0 | ~42 |
+| ours, Scenario C | 0 | ~31 |
 | ours with `--strict-buffers`, A / B / C | 0 | **0 / 0 / 0** |
+
+Our figures are approximate because an instance usually has several plans at the
+same optimal objective, and they do not all expose identically; the `0` and the
+`0 / 0 / 0` are exact. **Re-run `python3 tools/derive/exposure.py` against the
+outputs you actually hold rather than trusting these numbers.**
 
 **Two corrections, both withdrawing earlier claims.**
 

@@ -119,6 +119,21 @@ $ ./build/trackaccess diagnose --data /tmp/stress2 --scenario A --seconds 90
   lift: planned start weeks                 optimal
 ```
 
+### Rule-6 exposure
+
+`python3 tools/derive/exposure.py`, measured on the committed outputs:
+
+| Submission | adopted reading | literal reading |
+| --- | --- | --- |
+| upstream sample | **0** | 24 |
+| ours, A / B / C | **0 / 0 / 0** | ~23 / ~42 / ~31 |
+| ours `--strict-buffers`, A / B / C | **0 / 0 / 0** | **0 / 0 / 0** |
+
+The literal-reading counts for our own plans are approximate: several plans share
+the same optimal objective and do not all expose identically. That the sample
+itself breaches the literal reading 24 times is the evidence against that
+reading, and that figure is fixed because the sample is fixed.
+
 Note what this rules out: lifting our **closure/buffer** interpretation alone does
 **not** restore feasibility. The conservative reading documented in
 `docs/DERIVED_RULES.md` R6 is therefore not what limits density on these
