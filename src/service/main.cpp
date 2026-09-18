@@ -1296,6 +1296,10 @@ int main(int argc, char** argv) {
   if (g_store.UserCount() == 0)
     std::cout << "  NOTE: no accounts yet. Open the interface and create the first\n"
                  "        administrator, or restart with --bootstrap-admin user:password.\n";
+  // Flush explicitly: when the service is started under nohup or a supervisor,
+  // stdout is a pipe and the banner would otherwise sit in the buffer until the
+  // process exits - exactly when an operator no longer needs it.
+  std::cout << std::flush;
   if (g_cfg.host != "127.0.0.1" && g_cfg.host != "localhost")
     std::cout << "  NOTE: bound to a non-loopback address; put TLS in front of this service.\n";
 
