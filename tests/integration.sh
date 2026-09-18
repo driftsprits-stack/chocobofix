@@ -140,44 +140,43 @@ out=$(python3 tools/derive/exposure.py "$DATA" "$TMP/strict/A" 2>&1)
 echo "$out" | grep -qE "adopted: +0 +literal: +0" && ok "--strict-buffers output has 0 breaches under BOTH readings" \
   || no "--strict-buffers exposure: $out"
 
-echo "== service: start with token auth =="
-TOKEN=testtoken0123456789abcdef
+echo "== service: shared-project layer over HTTP =="
 "$BUILD/trackaccess-service" --host 127.0.0.1 --port "$PORT" --root "$TMP/var" --web web \
-  --worker "$BUILD/trackaccess" --token "$TOKEN" --public-instance "$DATA" > "$TMP/svc.log" 2>&1 &
+  --worker "$BUILD/trackaccess" --public-instance "$DATA" > "$TMP/svc.log" 2>&1 &
 SVC=$!
 for i in $(seq 1 40); do curl -sf "http://127.0.0.1:$PORT/api/v1/health" >/dev/null 2>&1 && break; sleep 0.25; done
 B="http://127.0.0.1:$PORT/api/v1"
-AUTH=(-H "Authorization: Bearer $TOKEN")
 
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
-chk "$(code "$B/health")" "200" "health needs no token"
-chk "$(code -X POST "$B/instances/demo")" "401" "an unauthenticated request is refused"
-chk "$(code -H 'Authorization: Bearer wrong-token-value-x' -X POST "$B/instances/demo")" "401" "a wrong token is refused"
+chk "$(code "$B/health")" "200" "health needs no session"
+chk "$(code -X POST "$B/projects?name=x")" "401" "an unauthenticated request is refused"
+chk "$(code -H 'Authorization: Bearer not-a-real-session' "$B/auth/me")" "401" "a bogus session token is refused"
+
+# Accounts, roles, projects, versions, approval and audit are covered in detail
+# by the Python suite, which drives exactly what the interface calls.
+if python3 tests/test_multiuser.py "http://127.0.0.1:$PORT" > "$TMP/mu.log" 2>&1; then
+  n=$(grep -cE '^  ok ' "$TMP/mu.log")
+  PASS=$((PASS+n)); printf '  ok   shared-project suite: %s checks passed\n' "$n"
+else
+  no "shared-project suite (see $TMP/mu.log)"; tail -15 "$TMP/mu.log"
+fi
+
+# Sign in as the planner the Python suite created, for the remaining checks.
+PTOK=$(curl -s -X POST "$B/auth/login" -d 'username=plan.pat&password=planner-password-01' \
+       | python3 -c 'import json,sys;print(json.load(sys.stdin)["token"])' 2>/dev/null)
+AUTH=(-H "Authorization: Bearer $PTOK")
 chk "$(code "${AUTH[@]}" "$B/jobs/doesnotexist")" "404" "an unknown job is a 404"
 chk "$(code "${AUTH[@]}" "$B/jobs/..%2f..%2fetc%2fpasswd")" "404" "a traversal-styled job id does not resolve"
-chk "$(code "${AUTH[@]}" "$B/instances/ABC123/detail")" "404" "an id outside our alphabet is refused"
-
-IID=$(curl -s "${AUTH[@]}" -X POST "$B/instances/demo" | python3 -c 'import json,sys;print(json.load(sys.stdin)["instance_id"])' 2>/dev/null)
-[ -n "$IID" ] && ok "bundled public instance loads over the API" || no "bundled public instance loads over the API"
-chk "$(code "${AUTH[@]}" -X POST "$B/jobs?instance_id=$IID&scenario=Z")" "400" "an unknown scenario is refused"
-chk "$(code "${AUTH[@]}" -X POST "$B/jobs?instance_id=nosuchinstance&scenario=A")" "404" "a job for an unknown instance is refused"
-
-JID=$(curl -s "${AUTH[@]}" -X POST "$B/jobs?instance_id=$IID&scenario=A&seconds=30" \
-      | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])' 2>/dev/null)
-for i in $(seq 1 60); do
-  ST=$(curl -s "${AUTH[@]}" "$B/jobs/$JID" | python3 -c 'import json,sys;print(json.load(sys.stdin)["state"])' 2>/dev/null)
-  [ "$ST" = done ] || [ "$ST" = failed ] || [ "$ST" = cancelled ] && break
-  sleep 1
-done
-chk "$ST" "done" "a solve job submitted over the API completes"
-feas=$(curl -s "${AUTH[@]}" "$B/jobs/$JID/validation/A" | python3 -c 'import json,sys;print(json.load(sys.stdin)["feasible"])' 2>/dev/null)
-chk "$feas" "True" "the API job's plan is feasible"
-chk "$(code "${AUTH[@]}" "$B/jobs/$JID/files/A/SCHEDULE_ACCESS.csv")" "200" "a competition file downloads"
-chk "$(code "${AUTH[@]}" "$B/jobs/$JID/files/A/ETC_PASSWD.csv")" "404" "a non-competition filename is refused"
+chk "$(code "${AUTH[@]}" "$B/instances/999999/detail")" "404" "an unknown instance is refused"
+PID=$(curl -s "${AUTH[@]}" "$B/projects" | python3 -c 'import json,sys;d=json.load(sys.stdin)["projects"];print(d[0]["id"] if d else "")' 2>/dev/null)
+IID=$(curl -s "${AUTH[@]}" "$B/projects/$PID/instances" | python3 -c 'import json,sys;d=json.load(sys.stdin)["instances"];print(d[0]["id"] if d else "")' 2>/dev/null)
+chk "$(code "${AUTH[@]}" -X POST "$B/projects/$PID/jobs?instance_id=$IID&scenario=Z")" "400" "an unknown scenario is refused"
+VID=$(curl -s "${AUTH[@]}" "$B/projects/$PID/versions" | python3 -c 'import json,sys;d=json.load(sys.stdin)["versions"];print(d[0]["id"] if d else "")' 2>/dev/null)
+chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/SCHEDULE_ACCESS.csv")" "200" "a competition file downloads from a version"
+chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/ETC_PASSWD.csv")" "404" "a non-competition filename is refused"
 
 echo "== the service survives a worker that dies =="
-before=$(curl -s "$B/health" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])')
-JID2=$(curl -s "${AUTH[@]}" -X POST "$B/jobs?instance_id=$IID&scenario=all&seconds=30" \
+JID2=$(curl -s "${AUTH[@]}" -X POST "$B/projects/$PID/jobs?instance_id=$IID&scenario=all&seconds=30" \
        | python3 -c 'import json,sys;print(json.load(sys.stdin)["job_id"])' 2>/dev/null)
 sleep 0.4
 pkill -9 -f "trackaccess solve" 2>/dev/null

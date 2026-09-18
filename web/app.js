@@ -48,20 +48,31 @@ const FILES = ['01_LINES.csv','02_STATIONS.csv','03_SECTORS.csv','04_LOCATION_SU
 // ---------------------------------------------------------------- state
 const S = {
   lang: localStorage.getItem('ta.lang') || 'en',
-  token: new URLSearchParams(location.search).get('token') || sessionStorage.getItem('ta.token') || '',
+  token: sessionStorage.getItem('ta.token') || '',
+  user: null,
+  projectId: null, projectRev: 0, projectName: '',
   instanceId: null, detail: null, jobId: null, poll: null,
-  picked: new Map(), results: {}, scenarios: [], current: null, selectedActivity: null
+  picked: new Map(), results: {}, scenarios: [], current: null, selectedActivity: null,
+  versions: [], versionByScenario: {}
 };
-if (S.token) sessionStorage.setItem('ta.token', S.token);
 
 const T = k => (window.I18N[S.lang] && window.I18N[S.lang][k]) || window.I18N.en[k] || k;
 
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
   if (S.token) h['Authorization'] = 'Bearer ' + S.token;
+  // A correlation id travels with every request and lands in the audit trail,
+  // so an operator can tie what they did to what the server recorded.
+  h['X-Correlation-Id'] = 'ui-' + Math.random().toString(36).slice(2, 10);
   const r = await fetch(path, Object.assign({}, opts, { headers: h }));
   const ct = r.headers.get('content-type') || '';
   const body = ct.includes('json') ? await r.json() : await r.text();
+  if (r.status === 401 && S.token) {
+    // The session expired or was revoked. Return to the gate rather than
+    // leaving controls on screen that will keep failing.
+    S.token = ''; S.user = null; sessionStorage.removeItem('ta.token');
+    showGate(T('session_expired'));
+  }
   if (!r.ok) throw Object.assign(new Error((body && body.error) || r.statusText), { status: r.status, body });
   return body;
 }
@@ -83,16 +94,161 @@ $('#sizeSel').addEventListener('change', e => {
 
 function showTab(name) {
   $$('#tabs button').forEach(b => b.setAttribute('aria-selected', String(b.dataset.tab === name)));
-  ['import','solve','schedule','network','check','repair','export']
+  ['projects','import','solve','schedule','network','check','repair','versions','export','audit','users']
     .forEach(t => $('#p-' + t).classList.toggle('hide', t !== name));
   if (name === 'network') drawNetwork();
   if (name === 'repair') fillRepairLocations();
+  if (name === 'versions') loadVersions();
+  if (name === 'audit') loadAudit();
+  if (name === 'users') loadUsers();
 }
 $$('#tabs button').forEach(b => b.addEventListener('click', () => { if (!b.disabled) showTab(b.dataset.tab); }));
 const enableTabs = on => ['solve','schedule','network','check','repair','export']
   .forEach(t => { $(`#tabs button[data-tab="${t}"]`).disabled = !on; });
 
-// ---------------------------------------------------------------- 1 import
+// ---------------------------------------------------------------- auth
+let GATE_MODE = 'login';   // or 'bootstrap'
+
+function showGate(msg) {
+  $('#gate').classList.remove('hide');
+  $('#app').classList.add('hide');
+  $('#tabs').classList.add('hide');
+  $('#gateMsg').innerHTML = msg ? `<span class="chip bad">${esc(msg)}</span>` : '';
+}
+function hideGate() {
+  $('#gate').classList.add('hide');
+  $('#app').classList.remove('hide');
+  $('#tabs').classList.remove('hide');
+}
+
+function renderUserChip() {
+  if (!S.user) { $('#userChip').textContent = ''; return; }
+  const c = $('#userChip');
+  c.textContent = '';
+  c.append(el('b', { text: S.user.username }),
+           document.createTextNode(' · '),
+           el('span', { text: S.user.role }),
+           document.createTextNode(' '),
+           el('button', { class: 'btn', text: T('signout'), style: 'padding:0 8px', onclick: async () => {
+             try { await api('/api/v1/auth/logout', { method: 'POST' }); } catch (e) {}
+             S.token = ''; S.user = null; sessionStorage.removeItem('ta.token');
+             showGate('');
+           } }));
+  // Role-gated tabs: hidden entirely rather than shown and refused.
+  $('#tabs button[data-tab="audit"]').classList.toggle('hide', !S.user.can.view_audit);
+  $('#tabs button[data-tab="users"]').classList.toggle('hide', !S.user.can.manage_users);
+  $('#prjNewRow').classList.toggle('hide', !S.user.can.create_project);
+}
+
+$('#gateGo').addEventListener('click', doGate);
+$('#gp').addEventListener('keydown', e => { if (e.key === 'Enter') doGate(); });
+$('#gu').addEventListener('keydown', e => { if (e.key === 'Enter') doGate(); });
+
+async function doGate() {
+  const u = $('#gu').value.trim(), p = $('#gp').value;
+  if (!u || !p) { $('#gateMsg').innerHTML = `<span class="chip bad">${esc(T('need_both'))}</span>`; return; }
+  const path = GATE_MODE === 'bootstrap' ? '/api/v1/bootstrap' : '/api/v1/auth/login';
+  const q = new URLSearchParams({ username: u, password: p });
+  try {
+    const r = await api(path + '?' + q.toString(), { method: 'POST' });
+    if (GATE_MODE === 'bootstrap') { GATE_MODE = 'login'; await doGate(); return; }
+    S.token = r.token; S.user = r.user;
+    sessionStorage.setItem('ta.token', S.token);
+    $('#gp').value = '';
+    hideGate(); renderUserChip(); await loadProjects();
+    showTab('projects');
+  } catch (e) {
+    $('#gateMsg').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`;
+  }
+}
+
+async function boot() {
+  const h = await api('/api/v1/health');
+  if (h.needs_bootstrap) {
+    GATE_MODE = 'bootstrap';
+    $('#gateTitle').textContent = T('first_admin');
+    $('#gateHelp').textContent = T('first_admin_help');
+    $('#gateGo').textContent = T('create_admin');
+    showGate('');
+    return;
+  }
+  if (S.token) {
+    try {
+      const me = await api('/api/v1/auth/me');
+      S.user = me.user;
+      hideGate(); renderUserChip(); await loadProjects();
+      return;
+    } catch (e) { /* fall through to the gate */ }
+  }
+  showGate('');
+}
+
+// ---------------------------------------------------------------- 1 projects
+async function loadProjects() {
+  const r = await api('/api/v1/projects');
+  const tb = $('#prjTable tbody'); tb.textContent = '';
+  r.projects.forEach(p => {
+    const tr = el('tr', { tabindex: '0' },
+      el('td', { text: p.name }), el('td', { text: p.owner }),
+      el('td', { class: 'num', text: p.revision }), el('td', { text: p.created_at.slice(0, 16) }));
+    const pick = () => selectProject(p);
+    tr.addEventListener('click', pick);
+    tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    if (p.id === S.projectId) tr.classList.add('sel');
+    tb.append(tr);
+  });
+  if (!r.projects.length)
+    tb.append(el('tr', {}, el('td', { colspan: '4', class: 'note',
+      text: S.user && S.user.can.create_project ? T('no_projects_planner') : T('no_projects') })));
+}
+
+async function selectProject(p) {
+  S.projectId = p.id; S.projectRev = p.revision; S.projectName = p.name;
+  S.instanceId = null; S.detail = null; S.results = {}; S.scenarios = []; S.current = null;
+  $$('#prjTable tbody tr').forEach(x => x.classList.remove('sel'));
+  enableTabs(false);
+  $('#tabs button[data-tab="import"]').disabled = !(S.user && S.user.can.run_solve);
+  await loadInstances();
+  await loadVersions();
+  $('#tabs button[data-tab="versions"]').disabled = false;
+  await loadProjects();
+}
+
+async function loadInstances() {
+  if (!S.projectId) return;
+  const r = await api(`/api/v1/projects/${S.projectId}/instances`);
+  const tb = $('#instTable tbody'); tb.textContent = '';
+  r.instances.forEach(i => {
+    const tr = el('tr', { tabindex: '0' },
+      el('td', {}, el('b', { text: '#' + i.id }), el('div', { class: 'note', text: i.label || '' })),
+      el('td', { text: i.input_hash.slice(0, 16) + '…' }),
+      el('td', { text: i.uploaded_by }), el('td', { text: i.created_at.slice(0, 16) }));
+    const pick = async () => {
+      $$('#instTable tbody tr').forEach(x => x.classList.remove('sel'));
+      tr.classList.add('sel');
+      await useInstance(i.id);
+    };
+    tr.addEventListener('click', pick);
+    tr.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); pick(); } });
+    tb.append(tr);
+  });
+  if (!r.instances.length)
+    tb.append(el('tr', {}, el('td', { colspan: '4', class: 'note', text: T('no_instances') })));
+}
+
+$('#prjCreate').addEventListener('click', async () => {
+  const name = $('#prjName').value.trim();
+  if (!name) return;
+  try {
+    const p = await api('/api/v1/projects?' + new URLSearchParams({ name }).toString(), { method: 'POST' });
+    $('#prjName').value = '';
+    $('#prjMsg').innerHTML = '<span class="chip ok">created</span>';
+    await loadProjects();
+    await selectProject({ id: p.id, revision: p.revision, name: p.name });
+  } catch (e) { $('#prjMsg').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`; }
+});
+
+// ---------------------------------------------------------------- 2 import
 function renderPicked() {
   const fl = $('#fl'); fl.textContent = '';
   FILES.forEach(f => {
@@ -128,9 +284,19 @@ function showImportErrors(errs) {
     el('td', { text: e.file }), el('td', { class: 'num', text: e.row || '' }),
     el('td', { text: e.field || '' }), el('td', { text: e.message, style: 'white-space:normal' }))));
 }
+async function useInstance(id) {
+  S.instanceId = id;
+  S.detail = await api(`/api/v1/instances/${id}/detail`);
+  const s = S.detail.summary;
+  $('#instMeta').innerHTML = `<b>${esc(s.activities)}</b> activities · <b>${esc(s.contracts)}</b> contracts · ${esc(s.horizon_weeks)} wk · <code>${esc(s.input_hash.slice(0,8))}</code>`;
+  $('#wk').max = s.horizon_weeks;
+  enableTabs(true);
+  showTab('solve');
+}
+
 async function afterLoad(res) {
-  S.instanceId = res.instance_id;
-  S.detail = await api(`/api/v1/instances/${S.instanceId}/detail`);
+  await loadInstances();
+  await useInstance(res.instance_id);
   const s = res.summary;
   $('#impErrTable').classList.add('hide');
   $('#impIdle').classList.add('hide');
@@ -143,18 +309,17 @@ async function afterLoad(res) {
   add('Total access-nights required', s.total_accesses);
   add('Buffer-conflicting pairs', s.exclusive_pairs);
   add('Input hash', s.input_hash.slice(0, 24) + '…');
-  $('#instMeta').innerHTML = `<b>${esc(s.activities)}</b> activities · <b>${esc(s.contracts)}</b> contracts · ${esc(s.horizon_weeks)} wk · <code>${esc(s.input_hash.slice(0,8))}</code>`;
-  $('#wk').max = s.horizon_weeks;
-  enableTabs(true);
-  $('#impStatus').innerHTML = `<span class="chip ok">accepted</span>`;
-  showTab('solve');
+  if (res.invalidated_plans)
+    $('#impStatus').innerHTML =
+      `<span class="chip ok">accepted</span> <span class="chip warn">${res.invalidated_plans} earlier plan(s) invalidated</span>`;
+  else $('#impStatus').innerHTML = `<span class="chip ok">accepted</span>`;
 }
 $('#upload').addEventListener('click', async () => {
   $('#impStatus').innerHTML = '<span class="chip idle">checking…</span>';
   const fd = new FormData();
   for (const [name, file] of S.picked) fd.append(name, file, name);
   try {
-    await afterLoad(await api('/api/v1/instances', { method: 'POST', body: fd }));
+    await afterLoad(await api(`/api/v1/projects/${S.projectId}/instances`, { method: 'POST', body: fd }));
   } catch (e) {
     $('#impStatus').innerHTML = '<span class="chip bad">rejected</span>';
     if (e.body && e.body.errors) showImportErrors(e.body.errors);
@@ -163,7 +328,7 @@ $('#upload').addEventListener('click', async () => {
 });
 $('#demo').addEventListener('click', async () => {
   $('#impStatus').innerHTML = '<span class="chip idle">loading…</span>';
-  try { await afterLoad(await api('/api/v1/instances/demo', { method: 'POST' })); }
+  try { await afterLoad(await api(`/api/v1/projects/${S.projectId}/instances/demo`, { method: 'POST' })); }
   catch (e) {
     $('#impStatus').innerHTML = '<span class="chip bad">unavailable</span>';
     showImportErrors([{ file: '', row: 0, field: '', message: e.message }]);
@@ -181,16 +346,29 @@ $('#run').addEventListener('click', async () => {
   $('#log').textContent = '';
   S.results = {}; S.scenarios = []; S.current = null;
   const p = new URLSearchParams({
-    instance_id: S.instanceId, scenario: $('#scen').value, seconds: $('#secs').value
+    instance_id: S.instanceId, scenario: $('#scen').value, seconds: $('#secs').value,
+    expected_revision: S.projectRev
   });
   try {
-    const job = await api('/api/v1/jobs?' + p.toString(), { method: 'POST' });
+    const job = await api(`/api/v1/projects/${S.projectId}/jobs?` + p.toString(), { method: 'POST' });
     S.jobId = job.job_id;
     $('#run').disabled = true; $('#cancel').disabled = false;
     $('#jobChip').innerHTML = '<span class="chip idle">queued</span>';
     S.poll = setInterval(pollJob, 700);
   } catch (e) {
-    $('#jobChip').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`;
+    if (e.status === 409 && e.body) {
+      // Someone else changed the project while this planner was working.
+      $('#jobChip').innerHTML =
+        `<span class="chip warn">${esc(e.message)} — you had revision ${esc(e.body.your_revision)}, ` +
+        `it is now ${esc(e.body.current_revision)}</span> `;
+      $('#jobChip').append(el('button', { class: 'btn', text: T('reload'), onclick: async () => {
+        S.projectRev = e.body.current_revision;
+        await loadVersions();
+        $('#jobChip').innerHTML = `<span class="chip idle">${esc(T('reloaded'))}</span>`;
+      } }));
+    } else {
+      $('#jobChip').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`;
+    }
   }
 });
 $('#cancel').addEventListener('click', async () => {
@@ -215,25 +393,136 @@ async function pollJob() {
 }
 
 async function collectResults() {
-  const want = $('#scen').value === 'all' ? ['A','B','C'] : [$('#scen').value];
+  // Read the recorded plan versions rather than the job directory: a version is
+  // the immutable thing an approver signs off, so the screen shows exactly what
+  // can be approved.
+  await loadVersions();
+  const job = await api(`/api/v1/jobs/${S.jobId}`).catch(() => null);
+  const mine = job ? new Set(job.version_ids) : null;
   S.results = {}; S.scenarios = [];
-  for (const sc of want) {
+  const candidates = S.versions.filter(v => !mine || mine.has(v.id));
+  for (const v of candidates) {
     try {
       const [acc, occ, rs, val] = await Promise.all([
-        api(`/api/v1/jobs/${S.jobId}/files/${sc}/SCHEDULE_ACCESS.csv`),
-        api(`/api/v1/jobs/${S.jobId}/files/${sc}/SCHEDULE_OCCUPANCY.csv`),
-        api(`/api/v1/jobs/${S.jobId}/files/${sc}/RESULTS.csv`),
-        api(`/api/v1/jobs/${S.jobId}/validation/${sc}`)
+        api(`/api/v1/versions/${v.id}/files/SCHEDULE_ACCESS.csv`),
+        api(`/api/v1/versions/${v.id}/files/SCHEDULE_OCCUPANCY.csv`),
+        api(`/api/v1/versions/${v.id}/files/RESULTS.csv`),
+        api(`/api/v1/versions/${v.id}/validation`)
       ]);
-      S.results[sc] = {
+      S.results[v.scenario] = {
         access: parseCsv(acc), occupancy: parseCsv(occ), results: parseCsv(rs),
-        validation: val, raw: { SCHEDULE_ACCESS: acc, SCHEDULE_OCCUPANCY: occ, RESULTS: rs }
+        validation: val, version: v,
+        raw: { SCHEDULE_ACCESS: acc, SCHEDULE_OCCUPANCY: occ, RESULTS: rs }
       };
-      S.scenarios.push(sc);
-    } catch (e) { /* scenario not produced */ }
+      if (!S.scenarios.includes(v.scenario)) S.scenarios.push(v.scenario);
+    } catch (e) { /* not produced */ }
   }
+  S.scenarios.sort();
   if (S.scenarios.length) { S.current = S.scenarios[0]; renderAll(); showTab('schedule'); }
 }
+
+// ---------------------------------------------------------------- 8 versions
+async function loadVersions() {
+  if (!S.projectId) return;
+  const r = await api(`/api/v1/projects/${S.projectId}/versions`);
+  S.versions = r.versions;
+  S.projectRev = r.revision;
+  const tb = $('#verTable tbody'); tb.textContent = '';
+  r.versions.forEach(v => {
+    const statusChip = el('span', {
+      class: 'chip ' + (v.status === 'approved' ? 'ok' : v.status === 'invalidated' ? 'bad'
+                        : v.status === 'superseded' ? 'idle' : 'idle'),
+      text: v.status });
+    const flags = el('span', {});
+    if (!v.feasible) flags.append(el('span', { class: 'chip bad', text: `${v.violations} violations` }));
+    if (v.is_fallback) flags.append(el('span', { class: 'chip warn', text: 'not submission-ready' }));
+    if (v.strict_buffers) flags.append(el('span', { class: 'chip idle', text: 'strict buffers' }));
+
+    const action = el('span', {});
+    if (S.user && S.user.can.approve) {
+      if (v.approvable) {
+        action.append(el('button', { class: 'btn primary', text: T('approve'), onclick: async () => {
+          try {
+            await api(`/api/v1/versions/${v.id}/approve?` + new URLSearchParams({
+              content_hash: v.content_hash, validation_hash: v.validation_hash }).toString(),
+              { method: 'POST' });
+            await loadVersions();
+          } catch (e) { alert(e.message); }
+        } }));
+      } else if (v.status === 'approved') {
+        action.append(el('button', { class: 'btn', text: T('revoke'), onclick: async () => {
+          const reason = prompt(T('revoke_why') || 'Reason for revoking?');
+          if (reason === null) return;
+          try {
+            await api(`/api/v1/versions/${v.id}/revoke?` + new URLSearchParams({ reason }).toString(),
+                      { method: 'POST' });
+            await loadVersions();
+          } catch (e) { alert(e.message); }
+        } }));
+      } else {
+        action.append(el('span', { class: 'note', text: v.not_approvable_because }));
+      }
+    } else {
+      action.append(el('span', { class: 'note', text: v.not_approvable_because || '—' }));
+    }
+    tb.append(el('tr', {},
+      el('td', {}, el('b', { text: 'v' + v.version_no }),
+         el('div', { class: 'note', text: v.content_hash.slice(0, 12) })),
+      el('td', { text: v.scenario }),
+      el('td', {}, statusChip, flags),
+      el('td', { class: 'num', text: v.objective }),
+      el('td', { text: v.created_by }),
+      el('td', { text: v.created_at.slice(0, 16) }),
+      el('td', {}, action)));
+  });
+  if (!r.versions.length)
+    tb.append(el('tr', {}, el('td', { colspan: '7', class: 'note', text: T('no_versions') })));
+}
+
+// ---------------------------------------------------------------- audit
+async function loadAudit() {
+  if (!S.projectId) return;
+  const r = await api(`/api/v1/projects/${S.projectId}/audit`);
+  const tb = $('#audTable tbody'); tb.textContent = '';
+  r.events.forEach(e => tb.append(el('tr', {},
+    el('td', { text: e.ts.replace('T', ' ').replace('Z', '') }),
+    el('td', { text: e.actor || '—' }),
+    el('td', { text: e.action }),
+    el('td', { text: e.object }),
+    el('td', {}, el('span', { class: 'chip ' + (e.result === 'ok' ? 'ok' : e.result === 'denied' || e.result === 'refused' ? 'bad' : 'idle'), text: e.result })),
+    el('td', { text: e.detail, style: 'white-space:normal' }))));
+}
+
+// ---------------------------------------------------------------- accounts
+async function loadUsers() {
+  const r = await api('/api/v1/users');
+  const tb = $('#usrTable tbody'); tb.textContent = '';
+  r.users.forEach(u => {
+    const act = el('span', {});
+    if (u.id !== S.user.id)
+      act.append(el('button', { class: 'btn', text: u.disabled ? T('enable') : T('disable'),
+        onclick: async () => {
+          await api(`/api/v1/users/${u.id}/disable?disabled=${u.disabled ? '0' : '1'}`, { method: 'POST' });
+          await loadUsers();
+        } }));
+    tb.append(el('tr', {},
+      el('td', { text: u.username }),
+      el('td', { text: u.role }),
+      el('td', {}, el('span', { class: 'chip ' + (u.disabled ? 'bad' : 'ok'),
+                                text: u.disabled ? 'disabled' : 'active' })),
+      el('td', {}, act)));
+  });
+}
+$('#usrCreate').addEventListener('click', async () => {
+  const q = new URLSearchParams({ username: $('#nu').value.trim(), password: $('#np').value,
+                                  role: $('#nr').value });
+  try {
+    await api('/api/v1/users?' + q.toString(), { method: 'POST' });
+    $('#nu').value = ''; $('#np').value = '';
+    $('#usrMsg').innerHTML = '<span class="chip ok">created</span>';
+    await loadUsers();
+  } catch (e) { $('#usrMsg').innerHTML = `<span class="chip bad">${esc(e.message)}</span>`; }
+});
 
 // ---------------------------------------------------------------- rendering
 function scenarioSwitcher() {
@@ -528,6 +817,18 @@ function renderExport() {
       el('span', { class: 'chip ' + (v.feasible ? 'ok' : 'bad'),
                    text: v.feasible ? T('feasible') : `${v.hard_violations.length} ${T('viols')}` }),
       el('span', { class: 'note', text: `  ${T('objective')} ${v.soft_scores.objective_score ?? '—'}` })));
+    const pv = S.results[sc].version;
+    if (pv) {
+      box.append(el('p', {},
+        el('span', { class: 'chip ' + (pv.status === 'approved' ? 'ok' : 'idle'),
+                     text: 'v' + pv.version_no + ' · ' + pv.status }),
+        pv.status === 'approved'
+          ? el('span', { class: 'note', text: `  approved by ${pv.approved_by} at ${pv.approved_at}` })
+          : el('span', { class: 'note', text: '  ' + (pv.not_approvable_because || T('awaiting_approval')) })));
+      if (pv.is_fallback)
+        box.append(el('p', { class: 'note', style: 'color:#8a5300',
+          text: T('fallback_warning') }));
+    }
     if (!v.feasible)
       box.append(el('p', { class: 'note', style: 'color:#a01c1c',
         text: 'This plan did not pass the independent check and is not marked submission-ready.' }));
@@ -562,3 +863,4 @@ applyLang();
 enableTabs(false);
 renderPicked();
 updateScenarioHelp();
+boot().catch(e => showGate(String(e.message || e)));

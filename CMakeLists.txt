@@ -50,9 +50,29 @@ target_link_libraries(ta_solver PUBLIC ta_core ortools::ortools)
 add_executable(trackaccess src/cli/main.cpp)
 target_link_libraries(trackaccess PRIVATE ta_solver)
 
+# --- shared-project persistence -------------------------------------------
+# SQLite is the system library on both macOS and mainstream Linux. Password
+# hashing uses the platform's vetted PBKDF2: CommonCrypto on Apple, OpenSSL
+# elsewhere. Nothing cryptographic is implemented in this project.
+find_package(SQLite3 REQUIRED)
+add_library(ta_store STATIC src/service/store.cpp src/service/crypto.cpp)
+target_include_directories(ta_store PUBLIC src)
+target_link_libraries(ta_store PUBLIC ta_core SQLite3::SQLite3)
+if(APPLE)
+  message(STATUS "Password hashing: CommonCrypto PBKDF2-HMAC-SHA256")
+else()
+  find_package(OpenSSL REQUIRED)
+  target_compile_definitions(ta_store PRIVATE TA_HAVE_OPENSSL=1)
+  target_link_libraries(ta_store PUBLIC OpenSSL::Crypto)
+  message(STATUS "Password hashing: OpenSSL PBKDF2-HMAC-SHA256")
+endif()
+
+add_executable(test_store tests/test_store.cpp)
+target_link_libraries(test_store PRIVATE ta_store)
+
 add_executable(trackaccess-service src/service/main.cpp)
 target_include_directories(trackaccess-service PRIVATE third_party)
-target_link_libraries(trackaccess-service PRIVATE ta_core)
+target_link_libraries(trackaccess-service PRIVATE ta_store)
 find_package(Threads REQUIRED)
 target_link_libraries(trackaccess-service PRIVATE Threads::Threads)
 
@@ -61,3 +81,4 @@ target_link_libraries(test_core PRIVATE ta_core)
 enable_testing()
 add_test(NAME core COMMAND test_core WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 add_test(NAME sample COMMAND check_sample WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+add_test(NAME store COMMAND test_store WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})

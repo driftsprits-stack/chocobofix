@@ -1,0 +1,189 @@
+// Shared-project persistence: accounts, sessions, projects, instances, plan
+// versions, approvals and an audit trail, in one SQLite database.
+//
+// The service process is the only writer. Clients never open the database, so a
+// network share can never end up with two writers. Every mutating call is
+// wrapped in a transaction and reports success only after it commits.
+#pragma once
+
+#include <optional>
+#include <string>
+#include <vector>
+
+struct sqlite3;
+
+namespace ta {
+
+// Single-valued, deliberately. Administrative access does NOT imply approval:
+// the brief requires those duties to be separable, so an administrator manages
+// accounts and an approver signs plans off, and neither can do the other's job.
+enum class Role { kViewer, kPlanner, kApprover, kAdministrator };
+
+std::string_view ToString(Role r);
+std::optional<Role> ParseRole(std::string_view s);
+
+// Capabilities are named, not inferred from role ordering, so the matrix is
+// readable and testable in one place.
+enum class Cap {
+  kViewProject,
+  kCreateProject,
+  kUploadInstance,
+  kRunSolve,
+  kApprovePlan,
+  kManageUsers,
+  kViewAudit,
+};
+bool RoleHas(Role r, Cap c);
+
+struct User {
+  long long id = 0;
+  std::string username;
+  Role role = Role::kViewer;
+  bool disabled = false;
+  std::string created_at;
+};
+
+struct Project {
+  long long id = 0;
+  std::string name;
+  long long owner_id = 0;
+  long long revision = 0;    // optimistic concurrency token
+  std::string created_at;
+};
+
+struct InstanceRec {
+  long long id = 0;
+  long long project_id = 0;
+  std::string dir;
+  std::string input_hash;
+  long long uploaded_by = 0;
+  std::string created_at;
+  std::string label;
+};
+
+// A plan version is immutable once written. Editing produces a new version;
+// nothing is ever rewritten in place, so an approval can be bound to exact bytes.
+struct PlanVersion {
+  long long id = 0;
+  long long project_id = 0;
+  long long instance_id = 0;
+  std::string scenario;         // "A" | "B" | "C"
+  int version_no = 0;
+  long long created_by = 0;
+  std::string created_at;
+  std::string dir;
+
+  bool feasible = false;
+  int violations = 0;
+  long long objective_tenths = 0;
+  std::string content_hash;     // over the three competition files
+  std::string validation_hash;  // over the validation report
+  std::string input_hash;       // of the instance it was produced from
+
+  bool is_fallback = false;     // produced with --fallback: breaches scenario policy
+  bool strict_buffers = false;
+
+  // draft | approved | superseded | invalidated
+  std::string status = "draft";
+  long long approved_by = 0;
+  std::string approved_at;
+};
+
+struct Approval {
+  long long id = 0;
+  long long plan_version_id = 0;
+  long long approved_by = 0;
+  std::string approved_at;
+  std::string content_hash;
+  std::string validation_hash;
+  bool revoked = false;
+  long long revoked_by = 0;
+  std::string revoked_at;
+  std::string revoke_reason;
+};
+
+struct AuditEvent {
+  long long id = 0;
+  std::string ts;
+  long long actor_id = 0;
+  std::string actor_name;
+  std::string action;
+  std::string object_type;
+  std::string object_id;
+  std::string result;
+  std::string correlation_id;
+  std::string detail;
+};
+
+class Store {
+ public:
+  ~Store();
+  // Opens (creating if needed) and applies migrations. `err` is set on failure.
+  bool Open(const std::string& path, std::string* err);
+
+  // --- users -------------------------------------------------------------
+  bool CreateUser(const std::string& username, const std::string& password, Role role,
+                  User* out, std::string* err);
+  std::optional<User> FindUser(const std::string& username);
+  std::optional<User> UserById(long long id);
+  std::vector<User> ListUsers();
+  bool SetUserDisabled(long long id, bool disabled, std::string* err);
+  bool SetUserRole(long long id, Role role, std::string* err);
+  bool SetPassword(long long id, const std::string& password, std::string* err);
+  // Verifies credentials. Returns nullopt for unknown user, wrong password or a
+  // disabled account, without distinguishing them to the caller.
+  std::optional<User> Authenticate(const std::string& username, const std::string& password);
+  int UserCount();
+
+  // --- sessions ----------------------------------------------------------
+  // Returns the bearer token. Only its hash is stored, so a database copy does
+  // not yield usable sessions.
+  std::string CreateSession(long long user_id, int idle_seconds, int absolute_seconds);
+  std::optional<User> UserForSession(const std::string& token);   // also refreshes last_seen
+  void RevokeSession(const std::string& token);
+  void RevokeAllSessionsFor(long long user_id);
+  int PurgeExpiredSessions();
+
+  // --- projects ----------------------------------------------------------
+  bool CreateProject(const std::string& name, long long owner_id, Project* out, std::string* err);
+  std::optional<Project> ProjectById(long long id);
+  std::vector<Project> ListProjects();
+  // Optimistic concurrency: fails if `expected_revision` is not current.
+  bool BumpProjectRevision(long long id, long long expected_revision, std::string* err);
+
+  // --- instances ---------------------------------------------------------
+  bool AddInstance(const InstanceRec& rec, InstanceRec* out, std::string* err);
+  std::optional<InstanceRec> InstanceById(long long id);
+  std::vector<InstanceRec> ListInstances(long long project_id);
+
+  // --- plan versions -----------------------------------------------------
+  bool AddPlanVersion(const PlanVersion& pv, PlanVersion* out, std::string* err);
+  std::optional<PlanVersion> PlanVersionById(long long id);
+  std::vector<PlanVersion> ListPlanVersions(long long project_id);
+
+  // Approval is bound to the exact content and validation the approver saw. A
+  // mismatch means the plan changed underneath them and the call fails.
+  bool ApprovePlan(long long version_id, long long approver_id,
+                   const std::string& expect_content_hash,
+                   const std::string& expect_validation_hash, std::string* err);
+  bool RevokeApproval(long long version_id, long long actor_id, const std::string& reason,
+                      std::string* err);
+  std::vector<Approval> ListApprovals(long long project_id);
+  // Marks every approved version of this project as invalidated because the
+  // input it was produced from is no longer current. Returns how many.
+  int InvalidateApprovalsForChangedInput(long long project_id, const std::string& new_input_hash,
+                                         long long actor_id);
+
+  // --- audit -------------------------------------------------------------
+  void Audit(long long actor_id, const std::string& action, const std::string& object_type,
+             const std::string& object_id, const std::string& result,
+             const std::string& correlation_id, const std::string& detail);
+  std::vector<AuditEvent> ListAudit(int limit, const std::string& object_type,
+                                    const std::string& object_id);
+
+ private:
+  bool Exec(const std::string& sql, std::string* err);
+  sqlite3* db_ = nullptr;
+};
+
+}  // namespace ta

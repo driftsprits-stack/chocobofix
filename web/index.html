@@ -11,6 +11,7 @@
   <div class="brand">TrackAccess<small data-i18n="brand_sub">Line Alpha / Line Beta possession planner</small></div>
   <div class="spacer"></div>
   <div class="meta" id="instMeta"><span data-i18n="no_instance">No instance loaded</span></div>
+  <div class="meta" id="userChip"></div>
   <label class="sr" for="langSel">Language</label>
   <select id="langSel" title="Language">
     <option value="en">English</option>
@@ -26,19 +27,71 @@
 </header>
 
 <nav class="tabs" role="tablist" id="tabs">
-  <button role="tab" data-tab="import"  aria-selected="true"  data-i18n="tab_import">1 · Import</button>
-  <button role="tab" data-tab="solve"   aria-selected="false" data-i18n="tab_solve"   disabled>2 · Generate</button>
-  <button role="tab" data-tab="schedule"aria-selected="false" data-i18n="tab_schedule" disabled>3 · Schedule</button>
-  <button role="tab" data-tab="network" aria-selected="false" data-i18n="tab_network" disabled>4 · Network</button>
-  <button role="tab" data-tab="check"   aria-selected="false" data-i18n="tab_check"   disabled>5 · Check</button>
-  <button role="tab" data-tab="repair"  aria-selected="false" data-i18n="tab_repair"  disabled>6 · Repair</button>
-  <button role="tab" data-tab="export"  aria-selected="false" data-i18n="tab_export"  disabled>7 · Export</button>
+  <button role="tab" data-tab="projects" aria-selected="true" data-i18n="tab_projects">1 · Project</button>
+  <button role="tab" data-tab="import"  aria-selected="false" data-i18n="tab_import" disabled>2 · Import</button>
+  <button role="tab" data-tab="solve"   aria-selected="false" data-i18n="tab_solve"   disabled>3 · Generate</button>
+  <button role="tab" data-tab="schedule"aria-selected="false" data-i18n="tab_schedule" disabled>4 · Schedule</button>
+  <button role="tab" data-tab="network" aria-selected="false" data-i18n="tab_network" disabled>5 · Network</button>
+  <button role="tab" data-tab="check"   aria-selected="false" data-i18n="tab_check"   disabled>6 · Check</button>
+  <button role="tab" data-tab="repair"  aria-selected="false" data-i18n="tab_repair"  disabled>7 · Repair</button>
+  <button role="tab" data-tab="versions"aria-selected="false" data-i18n="tab_versions" disabled>8 · Versions</button>
+  <button role="tab" data-tab="export"  aria-selected="false" data-i18n="tab_export"  disabled>9 · Export</button>
+  <button role="tab" data-tab="audit"   aria-selected="false" data-i18n="tab_audit" class="hide">Audit</button>
+  <button role="tab" data-tab="users"   aria-selected="false" data-i18n="tab_users" class="hide">Accounts</button>
 </nav>
 
-<main class="wrap">
+<!-- SIGN IN -->
+<div id="gate" class="wrap hide">
+  <div class="panel" style="max-width:420px;margin:40px auto">
+    <h2 id="gateTitle" data-i18n="signin">Sign in</h2>
+    <div class="body">
+      <p class="note" id="gateHelp" data-i18n="signin_help">This deployment keeps each project and its uploaded data to the people who should see it.</p>
+      <div style="display:grid;gap:6px;margin-top:8px">
+        <label for="gu" data-i18n="username">Username</label>
+        <input type="text" id="gu" autocomplete="username">
+        <label for="gp" data-i18n="password">Password</label>
+        <input type="password" id="gp" autocomplete="current-password">
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button class="btn primary" id="gateGo" data-i18n="signin">Sign in</button>
+        <span id="gateMsg"></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<main class="wrap" id="app">
+
+<!-- 1 PROJECTS -->
+<section id="p-projects" class="grid g2">
+  <div class="panel">
+    <h2 data-i18n="prj_title">Projects</h2>
+    <div class="body tight">
+      <div class="scroll"><table id="prjTable">
+        <thead><tr><th data-i18n="c_project">Project</th><th data-i18n="c_owner">Owner</th>
+          <th class="num" data-i18n="c_rev">Rev</th><th data-i18n="c_created">Created</th></tr></thead>
+        <tbody></tbody></table></div>
+      <div class="body row" id="prjNewRow">
+        <input type="text" id="prjName" placeholder="New project name" style="flex:1;max-width:260px">
+        <button class="btn primary" id="prjCreate" data-i18n="prj_create">Create project</button>
+        <span id="prjMsg"></span>
+      </div>
+    </div>
+  </div>
+  <div class="panel">
+    <h2 data-i18n="prj_instances">Instances in this project</h2>
+    <div class="body tight">
+      <div class="scroll"><table id="instTable">
+        <thead><tr><th data-i18n="c_inst">Instance</th><th data-i18n="c_hash">Input hash</th>
+          <th data-i18n="c_by">Uploaded by</th><th data-i18n="c_created">Created</th></tr></thead>
+        <tbody></tbody></table></div>
+      <p class="note body" data-i18n="prj_pick">Select a project on the left, then choose an instance or import a new one.</p>
+    </div>
+  </div>
+</section>
 
 <!-- 1 IMPORT -->
-<section id="p-import" class="grid g2">
+<section id="p-import" class="hide grid g2">
   <div class="panel">
     <h2 data-i18n="imp_title">Instance files</h2>
     <div class="body">
@@ -197,7 +250,68 @@
   </div>
 </section>
 
-<!-- 7 EXPORT -->
+<!-- 8 VERSIONS -->
+<section id="p-versions" class="hide">
+  <div class="panel">
+    <h2 data-i18n="ver_title">Plan versions</h2>
+    <div class="body tight">
+      <div class="scroll"><table id="verTable">
+        <thead><tr><th data-i18n="c_ver">Version</th><th data-i18n="c_scenario">Scenario</th>
+          <th data-i18n="c_state">State</th><th class="num" data-i18n="c_obj">Objective</th>
+          <th data-i18n="c_by">Created by</th><th data-i18n="c_created">Created</th>
+          <th data-i18n="c_action">Action</th></tr></thead><tbody></tbody></table></div>
+      <p class="note body" data-i18n="ver_help">A version is immutable. Approval is bound to the exact plan and validation result shown here; if either changes, the approval does not carry over.</p>
+    </div>
+  </div>
+</section>
+
+<!-- AUDIT -->
+<section id="p-audit" class="hide">
+  <div class="panel">
+    <h2 data-i18n="aud_title">Audit history</h2>
+    <div class="body tight">
+      <div class="scroll" style="max-height:600px"><table id="audTable">
+        <thead><tr><th data-i18n="c_when">When</th><th data-i18n="c_actor">Actor</th>
+          <th data-i18n="c_action2">Action</th><th data-i18n="c_object">Object</th>
+          <th data-i18n="c_result">Result</th><th data-i18n="c_detail">Detail</th></tr></thead>
+        <tbody></tbody></table></div>
+    </div>
+  </div>
+</section>
+
+<!-- USERS -->
+<section id="p-users" class="hide grid g2">
+  <div class="panel">
+    <h2 data-i18n="usr_title">Accounts</h2>
+    <div class="body tight"><div class="scroll"><table id="usrTable">
+      <thead><tr><th data-i18n="c_user">Username</th><th data-i18n="c_role">Role</th>
+        <th data-i18n="c_state">State</th><th data-i18n="c_action">Action</th></tr></thead>
+      <tbody></tbody></table></div></div>
+  </div>
+  <div class="panel">
+    <h2 data-i18n="usr_new">Add an account</h2>
+    <div class="body">
+      <div style="display:grid;gap:6px">
+        <label for="nu" data-i18n="username">Username</label><input type="text" id="nu">
+        <label for="np" data-i18n="password">Password</label><input type="password" id="np">
+        <label for="nr" data-i18n="c_role">Role</label>
+        <select id="nr">
+          <option value="planner">planner</option>
+          <option value="approver">approver</option>
+          <option value="viewer">viewer</option>
+          <option value="administrator">administrator</option>
+        </select>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="btn primary" id="usrCreate" data-i18n="usr_add">Create</button>
+        <span id="usrMsg"></span>
+      </div>
+      <p class="note" data-i18n="usr_note">An administrator manages accounts but cannot approve a plan, and an approver cannot create one. Those duties are separated on purpose.</p>
+    </div>
+  </div>
+</section>
+
+<!-- 9 EXPORT -->
 <section id="p-export" class="hide">
   <div class="panel">
     <h2 data-i18n="exp_title">Competition files</h2>

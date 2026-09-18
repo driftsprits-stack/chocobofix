@@ -28,11 +28,26 @@
 #include "core/instance.h"
 #include "core/schedule.h"
 #include "httplib.h"
+#include "service/crypto.h"
+#include "service/store.h"
 #include "validator/validator.h"
 
 namespace fs = std::filesystem;
 
 namespace {
+
+// The store's vocabulary (User, Role, Cap, Project, PlanVersion) is used
+// throughout the handlers; core types stay explicitly ta::-qualified.
+using ta::Cap;
+using ta::InstanceRec;
+using ta::PlanVersion;
+using ta::Project;
+using ta::Role;
+using ta::ParseRole;
+using ta::RoleHas;
+using ta::Store;
+using ta::ToString;
+using ta::User;
 
 // --------------------------------------------------------------------------
 // Configuration
@@ -43,8 +58,8 @@ struct Config {
   std::string root = "./var";
   std::string web = "./web";
   std::string worker;               // path to the trackaccess binary
-  std::string token;                // bearer token; empty only with --auth none
-  bool require_auth = true;
+  int session_idle_seconds = 1800;      // 30 minutes without activity
+  int session_absolute_seconds = 28800; // 8 hours regardless of activity
   int max_concurrent_solves = 2;
   int max_queue = 32;
   double max_solve_seconds = 120.0;
@@ -54,6 +69,34 @@ struct Config {
 };
 
 Config g_cfg;
+Store g_store;
+
+// Bounded, in-memory login throttle. Keyed by username so a slow attacker
+// cannot lock every account out by hammering one; the queue cap bounds memory.
+std::mutex g_throttle_mu;
+std::unordered_map<std::string, std::pair<int, long long>> g_login_fails;
+
+bool LoginThrottled(const std::string& who) {
+  std::lock_guard<std::mutex> lk(g_throttle_mu);
+  auto it = g_login_fails.find(who);
+  if (it == g_login_fails.end()) return false;
+  const long long now = static_cast<long long>(std::time(nullptr));
+  if (now - it->second.second > 900) { g_login_fails.erase(it); return false; }
+  return it->second.first >= 10;
+}
+void NoteLoginFailure(const std::string& who) {
+  std::lock_guard<std::mutex> lk(g_throttle_mu);
+  if (g_login_fails.size() > 10000) g_login_fails.clear();
+  auto& e = g_login_fails[who];
+  const long long now = static_cast<long long>(std::time(nullptr));
+  if (now - e.second > 900) e = {0, now};
+  e.first++;
+  e.second = now;
+}
+void ClearLoginFailures(const std::string& who) {
+  std::lock_guard<std::mutex> lk(g_throttle_mu);
+  g_login_fails.erase(who);
+}
 
 std::string NowIso() {
   const auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
@@ -104,7 +147,13 @@ std::string Q(const std::string& s) { return "\"" + JsonEscape(s) + "\""; }
 // --------------------------------------------------------------------------
 struct Job {
   std::string id;
-  std::string instance_id;
+  std::string instance_id;          // store row id, as text
+  long long project_id = 0;
+  long long instance_row = 0;
+  long long actor_id = 0;
+  bool fallback = false;
+  bool strict_buffers = false;
+  std::vector<long long> created_versions;
   std::string scenario;             // "A" | "B" | "C" | "all"
   std::string state = "queued";     // queued | running | done | failed | cancelled
   std::string created_at, started_at, finished_at;
@@ -113,6 +162,8 @@ struct Job {
   std::string log;
   std::string error;
   pid_t pid = 0;
+  std::string instance_dir;
+  std::string correlation_id;
   std::atomic<bool> cancel{false};
 };
 
@@ -124,7 +175,6 @@ int g_running = 0;
 bool g_shutdown = false;
 
 std::string JobDir(const std::string& id) { return g_cfg.root + "/jobs/" + id; }
-std::string InstanceDir(const std::string& id) { return g_cfg.root + "/instances/" + id; }
 
 std::string JobJson(const Job& j) {
   std::ostringstream os;
@@ -136,7 +186,11 @@ std::string JobJson(const Job& j) {
      << "," << Q("started_at") << ":" << Q(j.started_at)
      << "," << Q("finished_at") << ":" << Q(j.finished_at)
      << "," << Q("error") << ":" << Q(j.error)
-     << "," << Q("progress") << ":[";
+     << "," << Q("project_id") << ":" << j.project_id
+     << "," << Q("version_ids") << ":[";
+  for (size_t i = 0; i < j.created_versions.size(); ++i)
+    os << (i ? "," : "") << j.created_versions[i];
+  os << "]," << Q("progress") << ":[";
   for (size_t i = 0; i < j.progress.size(); ++i) os << (i ? "," : "") << Q(j.progress[i]);
   os << "]}";
   return os.str();
@@ -145,7 +199,7 @@ std::string JobJson(const Job& j) {
 // Runs one solve as a child process. Returns the exit status, or -1 on spawn
 // failure. Output is streamed back so the UI can show live progress.
 int RunWorker(const std::shared_ptr<Job>& job) {
-  const std::string in = InstanceDir(job->instance_id);
+  const std::string in = job->instance_dir;
   const std::string out = JobDir(job->id);
   std::error_code ec;
   fs::create_directories(out, ec);
@@ -158,6 +212,8 @@ int RunWorker(const std::shared_ptr<Job>& job) {
   std::vector<std::string> argv_s = {g_cfg.worker, "solve", "--data", in, "--out", out,
                                      "--scenario", job->scenario, "--seconds", secs,
                                      "--workers", workers};
+  if (job->fallback) argv_s.push_back("--fallback");
+  if (job->strict_buffers) argv_s.push_back("--strict-buffers");
   std::vector<char*> argv;
   for (auto& s : argv_s) argv.push_back(const_cast<char*>(s.c_str()));
   argv.push_back(nullptr);
@@ -248,6 +304,68 @@ int RunWorkerSync(const std::vector<std::string>& argv_s, double seconds, std::s
   return WIFEXITED(status) ? WEXITSTATUS(status) : -2;
 }
 
+// Turns a finished job's output directories into immutable plan versions.
+// Each version records the hash of the three competition files and the hash of
+// the validation report, which is what an approval is later bound to.
+void RecordPlanVersions(const std::shared_ptr<Job>& job) {
+  const std::string base = JobDir(job->id);
+  for (const char* sc : {"A", "B", "C"}) {
+    const std::string dir = base + "/" + sc;
+    std::string access, occupancy, results, validation;
+    if (!ta::ReadFile(dir + "/SCHEDULE_ACCESS.csv", &access)) continue;
+    ta::ReadFile(dir + "/SCHEDULE_OCCUPANCY.csv", &occupancy);
+    ta::ReadFile(dir + "/RESULTS.csv", &results);
+    ta::ReadFile(dir + "/VALIDATION.json", &validation);
+
+    PlanVersion pv;
+    pv.project_id = job->project_id;
+    pv.instance_id = job->instance_row;
+    pv.scenario = sc;
+    pv.created_by = job->actor_id;
+    pv.dir = dir;
+    pv.strict_buffers = job->strict_buffers;
+    // A fallback plan is identified by the marker the worker writes beside it,
+    // not by what the caller asked for, so a plan can never lose the label.
+    pv.is_fallback = fs::exists(dir + "/NOT_SUBMISSION_READY.txt");
+    pv.content_hash = ta::Sha256Hex(access + occupancy + results);
+    pv.validation_hash = ta::Sha256Hex(validation);
+    pv.feasible = validation.find("\"feasible\": true") != std::string::npos;
+    // Parse the one figure we index on; the report itself stays authoritative.
+    // Scale to tenths BEFORE rounding, or 32.2 would be stored as 32.0.
+    auto tenths_after = [&](const std::string& key) -> long long {
+      const auto at = validation.find(key);
+      if (at == std::string::npos) return 0;
+      const auto colon = validation.find(':', at);
+      if (colon == std::string::npos) return 0;
+      try { return std::llround(10.0 * std::stod(validation.substr(colon + 1, 32))); }
+      catch (...) { return 0; }
+    };
+    pv.violations = 0;
+    { // count the entries in hard_violations
+      const auto at = validation.find("\"hard_violations\"");
+      if (at != std::string::npos) {
+        const auto close = validation.find(']', at);
+        const std::string seg = validation.substr(at, close == std::string::npos ? 0 : close - at);
+        size_t pos = 0;
+        while ((pos = seg.find("{\"rule\"", pos)) != std::string::npos) { ++pv.violations; ++pos; }
+      }
+    }
+    pv.objective_tenths = tenths_after("\"objective_score\"");
+    auto rec = g_store.InstanceById(job->instance_row);
+    pv.input_hash = rec ? rec->input_hash : "";
+
+    PlanVersion out;
+    std::string err;
+    if (g_store.AddPlanVersion(pv, &out, &err)) {
+      { std::lock_guard<std::mutex> lk(g_mu); job->created_versions.push_back(out.id); }
+      g_store.Audit(job->actor_id, "plan.create", "plan_version", std::to_string(out.id), "ok",
+                    job->correlation_id,
+                    std::string("scenario ") + sc + (pv.feasible ? " feasible" : " INFEASIBLE") +
+                        (pv.is_fallback ? " (fallback, not submission-ready)" : ""));
+    }
+  }
+}
+
 void WorkerLoop() {
   for (;;) {
     std::string id;
@@ -265,6 +383,11 @@ void WorkerLoop() {
     { std::lock_guard<std::mutex> lk(g_mu); job->state = "running"; job->started_at = NowIso(); }
 
     const int rc = RunWorker(job);
+
+    // Persist whatever the worker produced as immutable plan versions, before
+    // the job is reported finished, so a version always exists by the time the
+    // interface goes looking for one.
+    if (!job->cancel.load()) RecordPlanVersions(job);
 
     {
       std::lock_guard<std::mutex> lk(g_mu);
@@ -285,21 +408,119 @@ void WorkerLoop() {
 // --------------------------------------------------------------------------
 // Handlers
 // --------------------------------------------------------------------------
-bool Authorised(const httplib::Request& req) {
-  if (!g_cfg.require_auth) return true;
-  auto it = req.headers.find("Authorization");
-  if (it == req.headers.end()) return false;
-  const std::string expect = "Bearer " + g_cfg.token;
-  // Length-independent compare avoids leaking the token through timing.
-  if (it->second.size() != expect.size()) return false;
-  unsigned diff = 0;
-  for (size_t i = 0; i < expect.size(); ++i) diff |= static_cast<unsigned>(it->second[i] ^ expect[i]);
-  return diff == 0;
-}
-
 void Deny(httplib::Response& res, int code, const std::string& msg) {
   res.status = code;
   res.set_content("{\"error\":" + Q(msg) + "}", "application/json");
+}
+
+std::string BearerOf(const httplib::Request& req) {
+  auto it = req.headers.find("Authorization");
+  if (it == req.headers.end()) return "";
+  const std::string& v = it->second;
+  if (v.rfind("Bearer ", 0) != 0) return "";
+  return v.substr(7);
+}
+
+// Resolves the caller from their session. Every authorisation decision is made
+// here, server-side, from the stored role - never from anything the client sent.
+std::optional<User> CurrentUser(const httplib::Request& req) {
+  return g_store.UserForSession(BearerOf(req));
+}
+
+std::string CorrelationId(const httplib::Request& req) {
+  auto it = req.headers.find("X-Correlation-Id");
+  if (it != req.headers.end() && it->second.size() <= 64) {
+    std::string out;
+    for (char c : it->second)
+      if (std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_') out.push_back(c);
+    if (!out.empty()) return out;
+  }
+  return RandomId(12);
+}
+
+// Guard used at the top of every protected handler. Returns the caller, or
+// writes the refusal and returns nullopt. Denial is the default: a handler that
+// forgets to call this has no user to act as.
+std::optional<User> Require(const httplib::Request& req, httplib::Response& res, Cap cap) {
+  auto u = CurrentUser(req);
+  if (!u) { Deny(res, 401, "sign in to continue"); return std::nullopt; }
+  if (!RoleHas(u->role, cap)) {
+    g_store.Audit(u->id, "authz.deny", "capability", std::to_string(static_cast<int>(cap)),
+                  "denied", CorrelationId(req), "role " + std::string(ToString(u->role)));
+    Deny(res, 403, "your role (" + std::string(ToString(u->role)) +
+                   ") is not permitted to do this");
+    return std::nullopt;
+  }
+  return u;
+}
+
+// Dataset protection: an uploaded instance belongs to its project, and a project
+// is visible to its owner plus the roles that must review it. One judge's hidden
+// instance is therefore not readable by another judge.
+bool CanViewProject(const User& u, const Project& p) {
+  if (p.owner_id == u.id) return true;
+  return u.role == Role::kAdministrator || u.role == Role::kApprover;
+}
+
+std::optional<Project> RequireProject(const httplib::Request& req, httplib::Response& res,
+                                      const User& u, long long id) {
+  auto p = g_store.ProjectById(id);
+  // A project the caller may not see is reported as absent rather than
+  // forbidden, so the endpoint does not confirm that it exists.
+  if (!p || !CanViewProject(u, *p)) { Deny(res, 404, "no such project"); return std::nullopt; }
+  return p;
+}
+
+std::string UserJson(const User& u) {
+  std::ostringstream os;
+  os << "{" << Q("id") << ":" << u.id << "," << Q("username") << ":" << Q(u.username)
+     << "," << Q("role") << ":" << Q(std::string(ToString(u.role)))
+     << "," << Q("disabled") << ":" << (u.disabled ? "true" : "false")
+     << "," << Q("created_at") << ":" << Q(u.created_at)
+     << "," << Q("can") << ":{"
+     << Q("create_project") << ":" << (RoleHas(u.role, Cap::kCreateProject) ? "true" : "false") << ","
+     << Q("run_solve") << ":" << (RoleHas(u.role, Cap::kRunSolve) ? "true" : "false") << ","
+     << Q("approve") << ":" << (RoleHas(u.role, Cap::kApprovePlan) ? "true" : "false") << ","
+     << Q("manage_users") << ":" << (RoleHas(u.role, Cap::kManageUsers) ? "true" : "false") << ","
+     << Q("view_audit") << ":" << (RoleHas(u.role, Cap::kViewAudit) ? "true" : "false")
+     << "}}";
+  return os.str();
+}
+
+std::string PlanVersionJson(const PlanVersion& p) {
+  std::ostringstream os;
+  auto owner = g_store.UserById(p.created_by);
+  auto appr = p.approved_by ? g_store.UserById(p.approved_by) : std::nullopt;
+  os << "{" << Q("id") << ":" << p.id
+     << "," << Q("project_id") << ":" << p.project_id
+     << "," << Q("instance_id") << ":" << p.instance_id
+     << "," << Q("scenario") << ":" << Q(p.scenario)
+     << "," << Q("version_no") << ":" << p.version_no
+     << "," << Q("created_by") << ":" << Q(owner ? owner->username : "")
+     << "," << Q("created_at") << ":" << Q(p.created_at)
+     << "," << Q("feasible") << ":" << (p.feasible ? "true" : "false")
+     << "," << Q("violations") << ":" << p.violations
+     << "," << Q("objective") << ":" << (p.objective_tenths / 10) << "." << (p.objective_tenths % 10)
+     << "," << Q("content_hash") << ":" << Q(p.content_hash)
+     << "," << Q("validation_hash") << ":" << Q(p.validation_hash)
+     << "," << Q("input_hash") << ":" << Q(p.input_hash)
+     << "," << Q("is_fallback") << ":" << (p.is_fallback ? "true" : "false")
+     << "," << Q("strict_buffers") << ":" << (p.strict_buffers ? "true" : "false")
+     << "," << Q("status") << ":" << Q(p.status)
+     << "," << Q("approved_by") << ":" << Q(appr ? appr->username : "")
+     << "," << Q("approved_at") << ":" << Q(p.approved_at)
+     // Approval is refused for these, server-side. Surfacing the reason lets the
+     // interface explain rather than simply disable a control.
+     << "," << Q("approvable") << ":"
+     << ((p.feasible && !p.is_fallback && p.status == "draft") ? "true" : "false")
+     << "," << Q("not_approvable_because") << ":"
+     << Q(!p.feasible ? "it has hard violations"
+          : p.is_fallback ? "it was produced in fallback mode and breaches its scenario policy"
+          : p.status == "invalidated" ? "the input it was produced from is no longer current"
+          : p.status == "approved" ? "it is already approved"
+          : p.status == "superseded" ? "a newer version has been approved" : "")
+     << "}";
+  return os.str();
 }
 
 std::string SummariseInstance(const ta::Instance& inst) {
@@ -315,6 +536,60 @@ std::string SummariseInstance(const ta::Instance& inst) {
   int total = 0;
   for (const auto& a : inst.activities) total += a.total_accesses;
   os << total << "}";
+  return os.str();
+}
+
+
+// Full model for the interface: network, contracts, activities with their
+// expanded spans and closure zones. Canonical identifiers throughout.
+std::string InstanceDetailJson(const ta::Instance& inst) {
+  std::ostringstream os;
+  os << "{" << Q("summary") << ":" << SummariseInstance(inst) << "," << Q("locations") << ":[";
+  for (size_t i = 0; i < inst.locations.size(); ++i) {
+    const auto& L = inst.locations[i];
+    os << (i ? "," : "") << "{" << Q("id") << ":" << Q(L.id)
+       << "," << Q("kind") << ":" << Q(L.kind == ta::LocationKind::kTunnelSector ? "sector" : "platform")
+       << "," << Q("line") << ":" << Q(L.line)
+       << "," << Q("bound") << ":" << Q(L.bound == ta::Bound::kEB ? "EB" : "WB")
+       << "," << Q("supply") << ":" << L.supply_capacity
+       << "," << Q("chain") << ":" << L.chain_index << "}";
+  }
+  os << "]," << Q("contracts") << ":[";
+  for (size_t i = 0; i < inst.contracts.size(); ++i) {
+    const auto& c = inst.contracts[i];
+    os << (i ? "," : "") << "{" << Q("number") << ":" << Q(c.number)
+       << "," << Q("description") << ":" << Q(c.description)
+       << "," << Q("nature") << ":" << Q(std::string(ta::ToString(c.nature)))
+       << "," << Q("access_type") << ":" << Q(std::string(ta::ToString(c.access_type)))
+       << "," << Q("priority") << ":" << c.priority
+       << "," << Q("planned") << ":" << Q(c.planned_completion_date.ToIso())
+       << "," << Q("contractual") << ":" << Q(c.contract_completion_date.ToIso())
+       << "," << Q("planned_week") << ":" << c.planned_completion_week
+       << "," << Q("workfronts") << ":" << c.number_of_workfronts
+       << "," << Q("max_access_per_week") << ":" << c.max_access_per_week << "}";
+  }
+  os << "]," << Q("activities") << ":[";
+  for (size_t i = 0; i < inst.activities.size(); ++i) {
+    const auto& a = inst.activities[i];
+    os << (i ? "," : "") << "{" << Q("id") << ":" << Q(a.id)
+       << "," << Q("contract") << ":" << Q(inst.contracts[a.contract].number)
+       << "," << Q("total_accesses") << ":" << a.total_accesses
+       << "," << Q("priority") << ":" << a.activity_priority
+       << "," << Q("earliest_week") << ":" << a.earliest_week
+       << "," << Q("planned_start") << ":" << Q(a.planned_start_date.ToIso())
+       << "," << Q("from") << ":" << Q(a.start_location_id)
+       << "," << Q("to") << ":" << Q(a.end_location_id)
+       << "," << Q("predecessor") << ":"
+       << (a.predecessor == ta::kNoIndex ? "null" : Q(inst.activities[a.predecessor].id))
+       << "," << Q("occupied") << ":[";
+    for (size_t k = 0; k < a.occupied.size(); ++k)
+      os << (k ? "," : "") << Q(inst.locations[a.occupied[k]].id);
+    os << "]," << Q("closure") << ":[";
+    for (size_t k = 0; k < a.buffer_zone.size(); ++k)
+      os << (k ? "," : "") << Q(inst.locations[a.buffer_zone[k]].id);
+    os << "]}";
+  }
+  os << "]}";
   return os.str();
 }
 
@@ -334,10 +609,8 @@ int main(int argc, char** argv) {
   g_cfg.max_solve_seconds = std::stod(arg("--max-seconds", "120"));
   g_cfg.max_concurrent_solves = std::stoi(arg("--max-solves", "2"));
   g_cfg.public_instance = arg("--public-instance", "");
-  const std::string auth = arg("--auth", "token");
-  g_cfg.require_auth = (auth != "none");
-  g_cfg.token = arg("--token", "");
-  if (g_cfg.require_auth && g_cfg.token.empty()) g_cfg.token = RandomId(32);
+  g_cfg.session_idle_seconds = std::stoi(arg("--session-idle", "1800"));
+  g_cfg.session_absolute_seconds = std::stoi(arg("--session-max", "28800"));
 
   if (!fs::exists(g_cfg.worker)) {
     std::cerr << "worker binary not found at " << g_cfg.worker
@@ -347,6 +620,37 @@ int main(int argc, char** argv) {
   std::error_code ec;
   fs::create_directories(g_cfg.root + "/instances", ec);
   fs::create_directories(g_cfg.root + "/jobs", ec);
+  fs::create_directories(g_cfg.root + "/repairs", ec);
+
+  std::string serr;
+  if (!g_store.Open(g_cfg.root + "/trackaccess.sqlite", &serr)) {
+    std::cerr << "cannot open the store: " << serr << "\n";
+    return 1;
+  }
+  g_store.PurgeExpiredSessions();
+
+  // Optional first-run account, so a fresh deployment is usable without a
+  // separate admin tool. Ignored once any account exists.
+  const std::string boot = arg("--bootstrap-admin", "");
+  if (!boot.empty()) {
+    const auto colon = boot.find(':');
+    if (colon == std::string::npos) {
+      std::cerr << "--bootstrap-admin expects username:password\n";
+      return 1;
+    }
+    if (g_store.UserCount() == 0) {
+      User u;
+      std::string e;
+      if (!g_store.CreateUser(boot.substr(0, colon), boot.substr(colon + 1),
+                              Role::kAdministrator, &u, &e)) {
+        std::cerr << "could not create the initial administrator: " << e << "\n";
+        return 1;
+      }
+      std::cout << "created initial administrator: " << u.username << "\n";
+    } else {
+      std::cout << "accounts already exist; --bootstrap-admin ignored\n";
+    }
+  }
 
   httplib::Server srv;
   srv.set_payload_max_length(g_cfg.max_upload_bytes);
@@ -363,26 +667,180 @@ int main(int argc, char** argv) {
                    "script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'");
   });
 
+  // ---------------------------------------------------------------- health
   srv.Get("/api/v1/health", [](const httplib::Request&, httplib::Response& res) {
     std::lock_guard<std::mutex> lk(g_mu);
     std::ostringstream os;
     os << "{" << Q("status") << ":" << Q("ok")
        << "," << Q("queued") << ":" << g_queue.size()
        << "," << Q("running") << ":" << g_running
-       << "," << Q("auth_required") << ":" << (g_cfg.require_auth ? "true" : "false")
+       << "," << Q("needs_bootstrap") << ":" << (g_store.UserCount() == 0 ? "true" : "false")
        << "," << Q("time") << ":" << Q(NowIso()) << "}";
     res.set_content(os.str(), "application/json");
   });
 
-  // Upload the eight instance CSVs. Rejected uploads report every problem with
-  // file, row and field so a planner can fix the source data.
-  srv.Post("/api/v1/instances", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string id = RandomId();
-    const std::string dir = InstanceDir(id);
+  // ---------------------------------------------------------------- auth
+  // First-run only: creates the initial administrator. Refused once any account
+  // exists, so it cannot be used to mint a second one later.
+  srv.Post("/api/v1/bootstrap", [](const httplib::Request& req, httplib::Response& res) {
+    if (g_store.UserCount() != 0) return Deny(res, 409, "this deployment is already set up");
+    const std::string user = req.get_param_value("username");
+    const std::string pass = req.get_param_value("password");
+    std::string err;
+    User u;
+    if (!g_store.CreateUser(user, pass, Role::kAdministrator, &u, &err)) return Deny(res, 400, err);
+    g_store.Audit(u.id, "bootstrap", "user", std::to_string(u.id), "ok", CorrelationId(req),
+                  "initial administrator created");
+    res.set_content("{" + Q("user") + ":" + UserJson(u) + "}", "application/json");
+  });
+
+  srv.Post("/api/v1/auth/login", [](const httplib::Request& req, httplib::Response& res) {
+    const std::string user = req.get_param_value("username");
+    const std::string pass = req.get_param_value("password");
+    if (user.empty() || pass.empty()) return Deny(res, 400, "username and password are required");
+    if (LoginThrottled(user)) {
+      g_store.Audit(0, "auth.login", "user", user, "throttled", CorrelationId(req), "");
+      return Deny(res, 429, "too many failed attempts; wait a few minutes and try again");
+    }
+    auto u = g_store.Authenticate(user, pass);
+    if (!u) {
+      NoteLoginFailure(user);
+      g_store.Audit(0, "auth.login", "user", user, "denied", CorrelationId(req), "");
+      // One message for every failure mode, so the response does not reveal
+      // whether the account exists or is merely disabled.
+      return Deny(res, 401, "those credentials were not accepted");
+    }
+    ClearLoginFailures(user);
+    const std::string token =
+        g_store.CreateSession(u->id, g_cfg.session_idle_seconds, g_cfg.session_absolute_seconds);
+    if (token.empty()) return Deny(res, 500, "could not start a session");
+    g_store.Audit(u->id, "auth.login", "user", std::to_string(u->id), "ok", CorrelationId(req), "");
+    std::ostringstream os;
+    os << "{" << Q("token") << ":" << Q(token) << "," << Q("user") << ":" << UserJson(*u)
+       << "," << Q("idle_seconds") << ":" << g_cfg.session_idle_seconds
+       << "," << Q("absolute_seconds") << ":" << g_cfg.session_absolute_seconds << "}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Post("/api/v1/auth/logout", [](const httplib::Request& req, httplib::Response& res) {
+    auto u = CurrentUser(req);
+    g_store.RevokeSession(BearerOf(req));
+    if (u) g_store.Audit(u->id, "auth.logout", "user", std::to_string(u->id), "ok",
+                         CorrelationId(req), "");
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  srv.Get("/api/v1/auth/me", [](const httplib::Request& req, httplib::Response& res) {
+    auto u = CurrentUser(req);
+    if (!u) return Deny(res, 401, "sign in to continue");
+    res.set_content("{" + Q("user") + ":" + UserJson(*u) + "}", "application/json");
+  });
+
+  // ---------------------------------------------------------------- users
+  srv.Get("/api/v1/users", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kManageUsers);
+    if (!me) return;
+    std::ostringstream os;
+    os << "{" << Q("users") << ":[";
+    const auto all = g_store.ListUsers();
+    for (size_t i = 0; i < all.size(); ++i) os << (i ? "," : "") << UserJson(all[i]);
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Post("/api/v1/users", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kManageUsers);
+    if (!me) return;
+    const auto role = ParseRole(req.get_param_value("role"));
+    if (!role) return Deny(res, 400, "role must be viewer, planner, approver or administrator");
+    User u;
+    std::string err;
+    if (!g_store.CreateUser(req.get_param_value("username"), req.get_param_value("password"),
+                            *role, &u, &err)) {
+      g_store.Audit(me->id, "user.create", "user", req.get_param_value("username"), "failed",
+                    CorrelationId(req), err);
+      return Deny(res, 400, err);
+    }
+    g_store.Audit(me->id, "user.create", "user", std::to_string(u.id), "ok", CorrelationId(req),
+                  "role " + std::string(ToString(*role)));
+    res.set_content("{" + Q("user") + ":" + UserJson(u) + "}", "application/json");
+  });
+
+  srv.Post(R"(/api/v1/users/(\d+)/role)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kManageUsers);
+    if (!me) return;
+    const long long id = std::stoll(req.matches[1]);
+    const auto role = ParseRole(req.get_param_value("role"));
+    if (!role) return Deny(res, 400, "unknown role");
+    std::string err;
+    if (!g_store.SetUserRole(id, *role, &err)) return Deny(res, 400, err);
+    g_store.Audit(me->id, "user.role", "user", std::to_string(id), "ok", CorrelationId(req),
+                  "set to " + std::string(ToString(*role)));
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  srv.Post(R"(/api/v1/users/(\d+)/disable)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kManageUsers);
+    if (!me) return;
+    const long long id = std::stoll(req.matches[1]);
+    if (id == me->id) return Deny(res, 400, "you cannot disable your own account");
+    const bool off = req.get_param_value("disabled") != "0";
+    std::string err;
+    if (!g_store.SetUserDisabled(id, off, &err)) return Deny(res, 400, err);
+    g_store.Audit(me->id, off ? "user.disable" : "user.enable", "user", std::to_string(id), "ok",
+                  CorrelationId(req), "");
+    res.set_content("{\"ok\":true}", "application/json");
+  });
+
+  // ---------------------------------------------------------------- projects
+  srv.Get("/api/v1/projects", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    std::ostringstream os;
+    os << "{" << Q("projects") << ":[";
+    bool first = true;
+    for (const auto& p : g_store.ListProjects()) {
+      if (!CanViewProject(*me, p)) continue;    // dataset protection
+      auto owner = g_store.UserById(p.owner_id);
+      os << (first ? "" : ",") << "{" << Q("id") << ":" << p.id
+         << "," << Q("name") << ":" << Q(p.name)
+         << "," << Q("owner") << ":" << Q(owner ? owner->username : "")
+         << "," << Q("revision") << ":" << p.revision
+         << "," << Q("created_at") << ":" << Q(p.created_at) << "}";
+      first = false;
+    }
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Post("/api/v1/projects", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kCreateProject);
+    if (!me) return;
+    Project p;
+    std::string err;
+    if (!g_store.CreateProject(req.get_param_value("name"), me->id, &p, &err))
+      return Deny(res, 400, err);
+    g_store.Audit(me->id, "project.create", "project", std::to_string(p.id), "ok",
+                  CorrelationId(req), p.name);
+    std::ostringstream os;
+    os << "{" << Q("id") << ":" << p.id << "," << Q("name") << ":" << Q(p.name)
+       << "," << Q("revision") << ":" << p.revision << "}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  // Upload the eight instance CSVs into a project. Replacing the input
+  // invalidates any plan previously approved against the old one.
+  srv.Post(R"(/api/v1/projects/(\d+)/instances)",
+           [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kUploadInstance);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+
+    const std::string key = RandomId();
+    const std::string dir = g_cfg.root + "/instances/" + key;
     std::error_code ec2;
     fs::create_directories(dir, ec2);
-
     int written = 0;
     for (const char* const name : ta::kInstanceFiles) {
       auto it = req.files.find(name);
@@ -402,186 +860,55 @@ int main(int argc, char** argv) {
       res.set_content(os.str(), "application/json");
       return;
     }
-
     ta::Instance inst;
     std::vector<ta::InputError> errors;
     if (!ta::LoadInstance(dir, &inst, &errors)) {
+      fs::remove_all(dir, ec2);
       std::ostringstream os;
-      os << "{" << Q("instance_id") << ":null," << Q("accepted") << ":false,"
-         << Q("errors") << ":[";
+      os << "{" << Q("accepted") << ":false," << Q("errors") << ":[";
       for (size_t i = 0; i < errors.size() && i < 200; ++i)
         os << (i ? "," : "") << "{" << Q("file") << ":" << Q(errors[i].file)
            << "," << Q("row") << ":" << errors[i].row
            << "," << Q("field") << ":" << Q(errors[i].field)
            << "," << Q("message") << ":" << Q(errors[i].message) << "}";
       os << "]," << Q("error_count") << ":" << errors.size() << "}";
-      fs::remove_all(dir, ec2);
       res.status = 422;
       res.set_content(os.str(), "application/json");
+      g_store.Audit(me->id, "instance.upload", "project", std::to_string(proj->id), "rejected",
+                    CorrelationId(req), std::to_string(errors.size()) + " input problems");
       return;
     }
+    InstanceRec rec;
+    rec.project_id = proj->id;
+    rec.dir = dir;
+    rec.input_hash = inst.input_hash;
+    rec.uploaded_by = me->id;
+    rec.label = req.get_param_value("label");
+    std::string err;
+    if (!g_store.AddInstance(rec, &rec, &err)) return Deny(res, 500, err);
+    const int invalidated =
+        g_store.InvalidateApprovalsForChangedInput(proj->id, inst.input_hash, me->id);
+    g_store.Audit(me->id, "instance.upload", "instance", std::to_string(rec.id), "ok",
+                  CorrelationId(req),
+                  "input_hash " + inst.input_hash.substr(0, 12) +
+                      (invalidated ? "; invalidated " + std::to_string(invalidated) + " earlier plan(s)" : ""));
     std::ostringstream os;
-    os << "{" << Q("instance_id") << ":" << Q(id) << "," << Q("accepted") << ":true,"
-       << Q("summary") << ":" << SummariseInstance(inst) << "}";
+    os << "{" << Q("instance_id") << ":" << rec.id << "," << Q("accepted") << ":true,"
+       << Q("invalidated_plans") << ":" << invalidated
+       << "," << Q("summary") << ":" << SummariseInstance(inst) << "}";
     res.set_content(os.str(), "application/json");
   });
 
-  srv.Post("/api/v1/jobs", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string inst = req.get_param_value("instance_id");
-    std::string scenario = req.get_param_value("scenario");
-    if (scenario.empty()) scenario = "all";
-    if (!SafeId(inst) || !fs::exists(InstanceDir(inst)))
-      return Deny(res, 404, "unknown instance_id");
-    if (scenario != "all" && !ta::ParseScenario(scenario))
-      return Deny(res, 400, "scenario must be A, B, C or all");
-    double seconds = 60;
-    if (!req.get_param_value("seconds").empty()) {
-      try { seconds = std::stod(req.get_param_value("seconds")); } catch (...) {}
-    }
-    seconds = std::clamp(seconds, 1.0, g_cfg.max_solve_seconds);
-
-    auto job = std::make_shared<Job>();
-    job->id = RandomId();
-    job->instance_id = inst;
-    job->scenario = scenario;
-    job->seconds = seconds;
-    job->created_at = NowIso();
-    {
-      std::lock_guard<std::mutex> lk(g_mu);
-      if (static_cast<int>(g_queue.size()) >= g_cfg.max_queue)
-        return Deny(res, 429, "the solve queue is full; try again shortly");
-      g_jobs[job->id] = job;
-      g_queue.push_back(job->id);
-    }
-    g_cv.notify_all();
-    res.set_content(JobJson(*job), "application/json");
-  });
-
-  srv.Get(R"(/api/v1/jobs/([a-z0-9]+))", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_jobs.find(req.matches[1]);
-    if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
-    res.set_content(JobJson(*it->second), "application/json");
-  });
-
-  srv.Post(R"(/api/v1/jobs/([a-z0-9]+)/cancel)", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    std::shared_ptr<Job> job;
-    {
-      std::lock_guard<std::mutex> lk(g_mu);
-      auto it = g_jobs.find(req.matches[1]);
-      if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
-      job = it->second;
-      job->cancel.store(true);
-      if (job->pid > 0) ::kill(job->pid, SIGTERM);
-      if (job->state == "queued") { job->state = "cancelled"; job->finished_at = NowIso(); }
-    }
-    res.set_content(JobJson(*job), "application/json");
-  });
-
-  // Validation report for one scenario of a finished job.
-  srv.Get(R"(/api/v1/jobs/([a-z0-9]+)/validation/([ABC]))",
-          [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string p = JobDir(req.matches[1]) + "/" + std::string(req.matches[2]) + "/VALIDATION.json";
-    std::string body;
-    if (!ta::ReadFile(p, &body)) return Deny(res, 404, "no validation report for that scenario");
-    res.set_content(body, "application/json");
-  });
-
-  // Competition output files. Only the three canonical names are servable.
-  srv.Get(R"(/api/v1/jobs/([a-z0-9]+)/files/([ABC])/([A-Z_]+\.csv))",
-          [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string name = req.matches[3];
-    if (name != "SCHEDULE_ACCESS.csv" && name != "SCHEDULE_OCCUPANCY.csv" && name != "RESULTS.csv")
-      return Deny(res, 404, "not a competition output file");
-    std::string body;
-    if (!ta::ReadFile(JobDir(req.matches[1]) + "/" + std::string(req.matches[2]) + "/" + name, &body))
-      return Deny(res, 404, "file not produced");
-    res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
-    res.set_content(body, "text/csv");
-  });
-
-  srv.Get(R"(/api/v1/jobs/([a-z0-9]+)/log)", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    std::lock_guard<std::mutex> lk(g_mu);
-    auto it = g_jobs.find(req.matches[1]);
-    if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
-    res.set_content(it->second->log, "text/plain");
-  });
-
-  // Full instance detail for the interface: network, contracts, activities with
-  // their expanded spans and closure zones. Canonical ids throughout.
-  srv.Get(R"(/api/v1/instances/([a-z0-9]+)/detail)",
-          [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string id = req.matches[1];
-    if (!SafeId(id) || !fs::exists(InstanceDir(id))) return Deny(res, 404, "unknown instance");
-    ta::Instance inst;
-    std::vector<ta::InputError> errs;
-    if (!ta::LoadInstance(InstanceDir(id), &inst, &errs)) return Deny(res, 500, "instance no longer loads");
-    std::ostringstream os;
-    os << "{" << Q("summary") << ":" << SummariseInstance(inst) << "," << Q("locations") << ":[";
-    for (size_t i = 0; i < inst.locations.size(); ++i) {
-      const auto& L = inst.locations[i];
-      os << (i ? "," : "") << "{" << Q("id") << ":" << Q(L.id)
-         << "," << Q("kind") << ":" << Q(L.kind == ta::LocationKind::kTunnelSector ? "sector" : "platform")
-         << "," << Q("line") << ":" << Q(L.line)
-         << "," << Q("bound") << ":" << Q(L.bound == ta::Bound::kEB ? "EB" : "WB")
-         << "," << Q("supply") << ":" << L.supply_capacity
-         << "," << Q("chain") << ":" << L.chain_index << "}";
-    }
-    os << "]," << Q("contracts") << ":[";
-    for (size_t i = 0; i < inst.contracts.size(); ++i) {
-      const auto& c = inst.contracts[i];
-      os << (i ? "," : "") << "{" << Q("number") << ":" << Q(c.number)
-         << "," << Q("description") << ":" << Q(c.description)
-         << "," << Q("nature") << ":" << Q(std::string(ta::ToString(c.nature)))
-         << "," << Q("access_type") << ":" << Q(std::string(ta::ToString(c.access_type)))
-         << "," << Q("priority") << ":" << c.priority
-         << "," << Q("planned") << ":" << Q(c.planned_completion_date.ToIso())
-         << "," << Q("contractual") << ":" << Q(c.contract_completion_date.ToIso())
-         << "," << Q("planned_week") << ":" << c.planned_completion_week
-         << "," << Q("workfronts") << ":" << c.number_of_workfronts
-         << "," << Q("max_access_per_week") << ":" << c.max_access_per_week << "}";
-    }
-    os << "]," << Q("activities") << ":[";
-    for (size_t i = 0; i < inst.activities.size(); ++i) {
-      const auto& a = inst.activities[i];
-      os << (i ? "," : "") << "{" << Q("id") << ":" << Q(a.id)
-         << "," << Q("contract") << ":" << Q(inst.contracts[a.contract].number)
-         << "," << Q("total_accesses") << ":" << a.total_accesses
-         << "," << Q("priority") << ":" << a.activity_priority
-         << "," << Q("earliest_week") << ":" << a.earliest_week
-         << "," << Q("planned_start") << ":" << Q(a.planned_start_date.ToIso())
-         << "," << Q("from") << ":" << Q(a.start_location_id)
-         << "," << Q("to") << ":" << Q(a.end_location_id)
-         << "," << Q("predecessor") << ":"
-         << (a.predecessor == ta::kNoIndex ? "null" : Q(inst.activities[a.predecessor].id))
-         << "," << Q("occupied") << ":[";
-      for (size_t k = 0; k < a.occupied.size(); ++k)
-        os << (k ? "," : "") << Q(inst.locations[a.occupied[k]].id);
-      os << "]," << Q("closure") << ":[";
-      for (size_t k = 0; k < a.closure.size(); ++k)
-        os << (k ? "," : "") << Q(inst.locations[a.closure[k]].id);
-      os << "]}";
-    }
-    os << "]}";
-    res.set_content(os.str(), "application/json");
-  });
-
-  // One-click load of the bundled public instance, so a reviewer can exercise
-  // the whole workflow without hunting for files. Clearly a bundled dataset,
-  // never presented as a live upload.
-  srv.Post("/api/v1/instances/demo", [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
+  // Convenience for reviewers: copies the bundled public instance into a project.
+  srv.Post(R"(/api/v1/projects/(\d+)/instances/demo)",
+           [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kUploadInstance);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
     if (g_cfg.public_instance.empty() || !fs::exists(g_cfg.public_instance))
       return Deny(res, 404, "no public instance is bundled with this deployment");
-    const std::string id = RandomId();
-    const std::string dir = InstanceDir(id);
+    const std::string dir = g_cfg.root + "/instances/" + RandomId();
     std::error_code ec2;
     fs::create_directories(dir, ec2);
     for (const char* const name : ta::kInstanceFiles)
@@ -593,26 +920,304 @@ int main(int argc, char** argv) {
       fs::remove_all(dir, ec2);
       return Deny(res, 500, "the bundled public instance failed to load");
     }
+    InstanceRec rec;
+    rec.project_id = proj->id;
+    rec.dir = dir;
+    rec.input_hash = inst.input_hash;
+    rec.uploaded_by = me->id;
+    rec.label = "bundled public instance";
+    std::string err;
+    if (!g_store.AddInstance(rec, &rec, &err)) return Deny(res, 500, err);
+    const int invalidated =
+        g_store.InvalidateApprovalsForChangedInput(proj->id, inst.input_hash, me->id);
+    g_store.Audit(me->id, "instance.upload", "instance", std::to_string(rec.id), "ok",
+                  CorrelationId(req), "bundled public instance");
     std::ostringstream os;
-    os << "{" << Q("instance_id") << ":" << Q(id) << "," << Q("accepted") << ":true,"
-       << Q("bundled") << ":true," << Q("summary") << ":" << SummariseInstance(inst) << "}";
+    os << "{" << Q("instance_id") << ":" << rec.id << "," << Q("accepted") << ":true,"
+       << Q("bundled") << ":true," << Q("invalidated_plans") << ":" << invalidated
+       << "," << Q("summary") << ":" << SummariseInstance(inst) << "}";
     res.set_content(os.str(), "application/json");
   });
 
-  // "Why not earlier?" for one activity and week. Answers yes (with the cascade
-  // it causes), proven no (with the binding rule), or not established.
-  srv.Post(R"(/api/v1/instances/([a-z0-9]+)/explain)",
+  srv.Get(R"(/api/v1/projects/(\d+)/instances)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+    std::ostringstream os;
+    os << "{" << Q("instances") << ":[";
+    const auto all = g_store.ListInstances(proj->id);
+    for (size_t i = 0; i < all.size(); ++i) {
+      auto up = g_store.UserById(all[i].uploaded_by);
+      os << (i ? "," : "") << "{" << Q("id") << ":" << all[i].id
+         << "," << Q("input_hash") << ":" << Q(all[i].input_hash)
+         << "," << Q("uploaded_by") << ":" << Q(up ? up->username : "")
+         << "," << Q("created_at") << ":" << Q(all[i].created_at)
+         << "," << Q("label") << ":" << Q(all[i].label) << "}";
+    }
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Get(R"(/api/v1/instances/(\d+)/detail)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    auto rec = g_store.InstanceById(std::stoll(req.matches[1]));
+    if (!rec) return Deny(res, 404, "unknown instance");
+    auto proj = RequireProject(req, res, *me, rec->project_id);
+    if (!proj) return;
+    ta::Instance inst;
+    std::vector<ta::InputError> errs;
+    if (!ta::LoadInstance(rec->dir, &inst, &errs)) return Deny(res, 500, "instance no longer loads");
+    res.set_content(InstanceDetailJson(inst), "application/json");
+  });
+
+  // ---------------------------------------------------------------- jobs
+  srv.Post(R"(/api/v1/projects/(\d+)/jobs)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kRunSolve);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+
+    // Optimistic concurrency: the caller states the project revision they were
+    // looking at. A stale one is refused with the current state rather than
+    // quietly racing another planner.
+    const std::string expect = req.get_param_value("expected_revision");
+    if (!expect.empty()) {
+      long long want = -1;
+      try { want = std::stoll(expect); } catch (...) {}
+      if (want != proj->revision) {
+        std::ostringstream os;
+        os << "{" << Q("error") << ":"
+           << Q("this project changed while you were working on it") << ","
+           << Q("your_revision") << ":" << want << "," << Q("current_revision") << ":"
+           << proj->revision << "}";
+        res.status = 409;
+        res.set_content(os.str(), "application/json");
+        return;
+      }
+    }
+    auto rec = g_store.InstanceById(std::stoll(req.get_param_value("instance_id").empty()
+                                                   ? "0" : req.get_param_value("instance_id")));
+    if (!rec || rec->project_id != proj->id) return Deny(res, 404, "unknown instance");
+
+    std::string scenario = req.get_param_value("scenario");
+    if (scenario.empty()) scenario = "all";
+    if (scenario != "all" && !ta::ParseScenario(scenario))
+      return Deny(res, 400, "scenario must be A, B, C or all");
+    double seconds = 60;
+    if (!req.get_param_value("seconds").empty()) {
+      try { seconds = std::stod(req.get_param_value("seconds")); } catch (...) {}
+    }
+    seconds = std::clamp(seconds, 1.0, g_cfg.max_solve_seconds);
+
+    auto job = std::make_shared<Job>();
+    job->id = RandomId();
+    job->instance_id = std::to_string(rec->id);
+    job->project_id = proj->id;
+    job->instance_row = rec->id;
+    job->actor_id = me->id;
+    job->fallback = req.get_param_value("fallback") == "1";
+    job->strict_buffers = req.get_param_value("strict_buffers") == "1";
+    job->scenario = scenario;
+    job->seconds = seconds;
+    job->created_at = NowIso();
+    job->instance_dir = rec->dir;
+    job->correlation_id = CorrelationId(req);
+    {
+      std::lock_guard<std::mutex> lk(g_mu);
+      if (static_cast<int>(g_queue.size()) >= g_cfg.max_queue)
+        return Deny(res, 429, "the solve queue is full; try again shortly");
+      g_jobs[job->id] = job;
+      g_queue.push_back(job->id);
+    }
+    std::string err;
+    g_store.BumpProjectRevision(proj->id, proj->revision, &err);
+    g_store.Audit(me->id, "job.create", "project", std::to_string(proj->id), "ok",
+                  job->correlation_id, "scenario " + scenario);
+    g_cv.notify_all();
+    res.set_content(JobJson(*job), "application/json");
+  });
+
+  srv.Get(R"(/api/v1/jobs/([a-z0-9]+))", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    std::shared_ptr<Job> job;
+    {
+      std::lock_guard<std::mutex> lk(g_mu);
+      auto it = g_jobs.find(req.matches[1]);
+      if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
+      job = it->second;
+    }
+    auto proj = RequireProject(req, res, *me, job->project_id);
+    if (!proj) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    res.set_content(JobJson(*job), "application/json");
+  });
+
+  srv.Post(R"(/api/v1/jobs/([a-z0-9]+)/cancel)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kRunSolve);
+    if (!me) return;
+    std::shared_ptr<Job> job;
+    {
+      std::lock_guard<std::mutex> lk(g_mu);
+      auto it = g_jobs.find(req.matches[1]);
+      if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
+      job = it->second;
+    }
+    auto proj = RequireProject(req, res, *me, job->project_id);
+    if (!proj) return;
+    {
+      std::lock_guard<std::mutex> lk(g_mu);
+      job->cancel.store(true);
+      if (job->pid > 0) ::kill(job->pid, SIGTERM);
+      if (job->state == "queued") { job->state = "cancelled"; job->finished_at = NowIso(); }
+    }
+    g_store.Audit(me->id, "job.cancel", "job", job->id, "ok", CorrelationId(req), "");
+    std::lock_guard<std::mutex> lk(g_mu);
+    res.set_content(JobJson(*job), "application/json");
+  });
+
+  srv.Get(R"(/api/v1/jobs/([a-z0-9]+)/log)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    std::shared_ptr<Job> job;
+    {
+      std::lock_guard<std::mutex> lk(g_mu);
+      auto it = g_jobs.find(req.matches[1]);
+      if (it == g_jobs.end()) return Deny(res, 404, "unknown job");
+      job = it->second;
+    }
+    auto proj = RequireProject(req, res, *me, job->project_id);
+    if (!proj) return;
+    std::lock_guard<std::mutex> lk(g_mu);
+    res.set_content(job->log, "text/plain");
+  });
+
+  // ---------------------------------------------------------------- versions
+  srv.Get(R"(/api/v1/projects/(\d+)/versions)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+    std::ostringstream os;
+    os << "{" << Q("revision") << ":" << proj->revision << "," << Q("versions") << ":[";
+    const auto all = g_store.ListPlanVersions(proj->id);
+    for (size_t i = 0; i < all.size(); ++i) os << (i ? "," : "") << PlanVersionJson(all[i]);
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Get(R"(/api/v1/versions/(\d+)/validation)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    auto pv = g_store.PlanVersionById(std::stoll(req.matches[1]));
+    if (!pv) return Deny(res, 404, "unknown plan version");
+    auto proj = RequireProject(req, res, *me, pv->project_id);
+    if (!proj) return;
+    std::string body;
+    if (!ta::ReadFile(pv->dir + "/VALIDATION.json", &body))
+      return Deny(res, 404, "no validation report for that version");
+    res.set_content(body, "application/json");
+  });
+
+  srv.Get(R"(/api/v1/versions/(\d+)/files/([A-Z_]+\.csv))",
+          [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res, 401, "sign in to continue");
+    const std::string name = req.matches[2];
+    if (name != "SCHEDULE_ACCESS.csv" && name != "SCHEDULE_OCCUPANCY.csv" && name != "RESULTS.csv")
+      return Deny(res, 404, "not a competition output file");
+    auto pv = g_store.PlanVersionById(std::stoll(req.matches[1]));
+    if (!pv) return Deny(res, 404, "unknown plan version");
+    auto proj = RequireProject(req, res, *me, pv->project_id);
+    if (!proj) return;
+    std::string body;
+    if (!ta::ReadFile(pv->dir + "/" + name, &body)) return Deny(res, 404, "file not produced");
+    res.set_header("Content-Disposition", "attachment; filename=\"" + name + "\"");
+    res.set_content(body, "text/csv");
+  });
+
+  // Approval. The store refuses an infeasible or fallback plan regardless of who
+  // asks, and binds the approval to the exact content and validation the
+  // approver was shown.
+  srv.Post(R"(/api/v1/versions/(\d+)/approve)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kApprovePlan);
+    if (!me) return;
+    const long long id = std::stoll(req.matches[1]);
+    auto pv = g_store.PlanVersionById(id);
+    if (!pv) return Deny(res, 404, "unknown plan version");
+    auto proj = RequireProject(req, res, *me, pv->project_id);
+    if (!proj) return;
+    std::string err;
+    if (!g_store.ApprovePlan(id, me->id, req.get_param_value("content_hash"),
+                             req.get_param_value("validation_hash"), &err)) {
+      g_store.Audit(me->id, "plan.approve", "plan_version", std::to_string(id), "refused",
+                    CorrelationId(req), err);
+      return Deny(res, 409, err);
+    }
+    g_store.Audit(me->id, "plan.approve", "plan_version", std::to_string(id), "ok",
+                  CorrelationId(req),
+                  "scenario " + pv->scenario + " v" + std::to_string(pv->version_no) +
+                      " content " + pv->content_hash.substr(0, 12));
+    auto now = g_store.PlanVersionById(id);
+    res.set_content("{" + Q("version") + ":" + PlanVersionJson(*now) + "}", "application/json");
+  });
+
+  srv.Post(R"(/api/v1/versions/(\d+)/revoke)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kApprovePlan);
+    if (!me) return;
+    const long long id = std::stoll(req.matches[1]);
+    auto pv = g_store.PlanVersionById(id);
+    if (!pv) return Deny(res, 404, "unknown plan version");
+    auto proj = RequireProject(req, res, *me, pv->project_id);
+    if (!proj) return;
+    std::string err;
+    const std::string reason = req.get_param_value("reason");
+    if (!g_store.RevokeApproval(id, me->id, reason, &err)) return Deny(res, 409, err);
+    g_store.Audit(me->id, "plan.revoke", "plan_version", std::to_string(id), "ok",
+                  CorrelationId(req), reason);
+    auto now = g_store.PlanVersionById(id);
+    res.set_content("{" + Q("version") + ":" + PlanVersionJson(*now) + "}", "application/json");
+  });
+
+  // ---------------------------------------------------------------- audit
+  srv.Get(R"(/api/v1/projects/(\d+)/audit)", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kViewAudit);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+    std::ostringstream os;
+    os << "{" << Q("events") << ":[";
+    const auto ev = g_store.ListAudit(300, "", "");
+    bool first = true;
+    for (const auto& e : ev) {
+      os << (first ? "" : ",") << "{" << Q("ts") << ":" << Q(e.ts)
+         << "," << Q("actor") << ":" << Q(e.actor_name)
+         << "," << Q("action") << ":" << Q(e.action)
+         << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
+         << "," << Q("result") << ":" << Q(e.result)
+         << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
+         << "," << Q("detail") << ":" << Q(e.detail) << "}";
+      first = false;
+    }
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  // ------------------------------------------------- explain / repair
+  srv.Post(R"(/api/v1/instances/(\d+)/explain)",
            [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string id = req.matches[1];
-    if (!SafeId(id) || !fs::exists(InstanceDir(id))) return Deny(res, 404, "unknown instance");
+    auto me = Require(req, res, Cap::kRunSolve);
+    if (!me) return;
+    auto rec = g_store.InstanceById(std::stoll(req.matches[1]));
+    if (!rec) return Deny(res, 404, "unknown instance");
+    auto proj = RequireProject(req, res, *me, rec->project_id);
+    if (!proj) return;
     const std::string act = req.get_param_value("activity");
     const std::string week = req.get_param_value("week");
     std::string scen = req.get_param_value("scenario");
     if (scen.empty()) scen = "A";
-    if (act.empty() || week.empty()) return Deny(res, 400, "activity and week are required");
-    // Values reach execv as an argument vector, never a shell; still, reject
-    // anything that is not the shape we expect before spending a process on it.
     auto plain = [](const std::string& v, size_t max) {
       if (v.empty() || v.size() > max) return false;
       for (char c : v) if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-') return false;
@@ -623,31 +1228,31 @@ int main(int argc, char** argv) {
     double seconds = 15;
     if (!req.get_param_value("seconds").empty())
       try { seconds = std::clamp(std::stod(req.get_param_value("seconds")), 1.0, 60.0); } catch (...) {}
-
     std::string out;
-    const int rc = RunWorkerSync({g_cfg.worker, "explain", "--data", InstanceDir(id),
+    const int rc = RunWorkerSync({g_cfg.worker, "explain", "--data", rec->dir,
                                   "--activity", act, "--week", week, "--scenario", scen,
                                   "--seconds", std::to_string(seconds)}, seconds, &out);
+    g_store.Audit(me->id, "plan.explain", "instance", std::to_string(rec->id), "ok",
+                  CorrelationId(req), act + " week " + week);
     std::ostringstream os;
     os << "{" << Q("exit") << ":" << rc << "," << Q("output") << ":" << Q(out) << "}";
     res.set_content(os.str(), "application/json");
   });
 
-  // Disruption repair: change location supply in the input's own terms, re-plan,
-  // and report what had to move.
-  srv.Post(R"(/api/v1/instances/([a-z0-9]+)/repair)",
+  srv.Post(R"(/api/v1/instances/(\d+)/repair)",
            [](const httplib::Request& req, httplib::Response& res) {
-    if (!Authorised(req)) return Deny(res, 401, "authentication required");
-    const std::string id = req.matches[1];
-    if (!SafeId(id) || !fs::exists(InstanceDir(id))) return Deny(res, 404, "unknown instance");
+    auto me = Require(req, res, Cap::kRunSolve);
+    if (!me) return;
+    auto rec = g_store.InstanceById(std::stoll(req.matches[1]));
+    if (!rec) return Deny(res, 404, "unknown instance");
+    auto proj = RequireProject(req, res, *me, rec->project_id);
+    if (!proj) return;
     std::string scen = req.get_param_value("scenario");
     if (scen.empty()) scen = "A";
     if (!ta::ParseScenario(scen)) return Deny(res, 400, "scenario must be A, B or C");
     double seconds = 45;
     if (!req.get_param_value("seconds").empty())
       try { seconds = std::clamp(std::stod(req.get_param_value("seconds")), 1.0, 90.0); } catch (...) {}
-
-    // supply=LOC@WEEK=N, repeated. Only characters that appear in a location id.
     std::vector<std::string> specs;
     for (const auto& [k, v] : req.params) {
       if (k != "supply") continue;
@@ -660,16 +1265,17 @@ int main(int argc, char** argv) {
       if (specs.size() > 40) return Deny(res, 400, "too many supply overrides");
     }
     if (specs.empty()) return Deny(res, 400, "at least one supply override is required");
-
-    const std::string outdir = JobDir("repair_" + RandomId(8));
+    const std::string outdir = g_cfg.root + "/repairs/" + RandomId();
     std::error_code ec2;
     fs::create_directories(outdir, ec2);
-    std::vector<std::string> argv = {g_cfg.worker, "repair", "--data", InstanceDir(id),
+    std::vector<std::string> argv = {g_cfg.worker, "repair", "--data", rec->dir,
                                      "--out", outdir, "--scenario", scen,
                                      "--seconds", std::to_string(seconds)};
     for (const auto& sp : specs) { argv.push_back("--supply"); argv.push_back(sp); }
     std::string out;
     const int rc = RunWorkerSync(argv, seconds, &out);
+    g_store.Audit(me->id, "plan.repair", "instance", std::to_string(rec->id), rc == 0 ? "ok" : "failed",
+                  CorrelationId(req), std::to_string(specs.size()) + " supply overrides");
     std::ostringstream os;
     os << "{" << Q("exit") << ":" << rc << "," << Q("output") << ":" << Q(out) << "}";
     res.set_content(os.str(), "application/json");
@@ -684,8 +1290,12 @@ int main(int argc, char** argv) {
             << "  store       " << fs::absolute(g_cfg.root).string() << "\n"
             << "  web root    " << fs::absolute(g_cfg.web).string() << "\n"
             << "  worker      " << g_cfg.worker << "\n"
-            << "  auth        " << (g_cfg.require_auth ? "bearer token" : "DISABLED (--auth none)") << "\n";
-  if (g_cfg.require_auth) std::cout << "  token       " << g_cfg.token << "\n";
+            << "  accounts    " << g_store.UserCount() << "\n"
+            << "  sessions    idle " << g_cfg.session_idle_seconds << "s, absolute "
+            << g_cfg.session_absolute_seconds << "s\n";
+  if (g_store.UserCount() == 0)
+    std::cout << "  NOTE: no accounts yet. Open the interface and create the first\n"
+                 "        administrator, or restart with --bootstrap-admin user:password.\n";
   if (g_cfg.host != "127.0.0.1" && g_cfg.host != "localhost")
     std::cout << "  NOTE: bound to a non-loopback address; put TLS in front of this service.\n";
 
