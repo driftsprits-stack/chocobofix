@@ -6,9 +6,23 @@ Audience framing: a works controller at 02:00 who must decide whether a plan is
 safe to dispatch, not a software audience.
 
 Record at 1920×1080. Use the bundled public instance so figures are reproducible.
-Before recording: `./build/trackaccess-service --host 127.0.0.1 --port 8080
---auth none --root ./var --web ./web --worker ./build/trackaccess
---public-instance ./data/upstream/PS1/01_data`
+
+Before recording, start a clean service and seed three accounts, so the approval
+step can be shown without editing anything mid-take:
+
+```bash
+rm -rf ./var && ./build/trackaccess-service \
+  --host 127.0.0.1 --port 8080 --root ./var --web ./web \
+  --worker ./build/trackaccess \
+  --public-instance ./data/upstream/PS1/01_data \
+  --bootstrap-admin "admin.ada:administrator-pass-1" &
+# then, as admin.ada in the Accounts tab, create:
+#   plan.pat  planner     plan.pat  is who you record as for most of the take
+#   appr.avi  approver    appr.avi  signs the plan off at 2:40
+```
+
+Have two browser windows ready, one signed in as each, so the hand-off is a
+window switch rather than a login.
 
 ---
 
@@ -83,7 +97,19 @@ Then, on an activity: ask why it cannot run a week earlier.
 > Proven impossible — and it names the rule: its predecessor has not finished.
 > Not a guess, and not a timeout dressed up as a no.
 
-### 2:40–2:50 · Export, and the honest failure modes
+### 2:40–2:52 · Someone else has to sign it off
+
+Switch to the approver's window, Versions tab.
+
+> The planner who made this plan cannot approve it. Neither can the
+> administrator. Only an approver — and the approval is tied to this exact plan
+> and this exact validation result. Change either and it does not carry over.
+
+Click Approve. Then show the Audit tab.
+
+> Who did what, to which version, and when. Including the refusals.
+
+### 2:52–3:00 · Export, and the honest failure modes
 
 Export tab, download the three files.
 
@@ -99,14 +125,16 @@ trackaccess diagnose --data <dense-instance> --scenario A
 > it never reports a timeout as impossibility. Those are different answers and a
 > controller needs to know which one they have.
 
-### 2:50–3:00 · Close
+### 3:00 · Close
 
 > Four languages, keyboard throughout, no cloud dependency — it runs with the
 > network cable out. A planner sees the consequences of a decision before
-> committing to it.
+> committing to it, and nobody signs off their own work.
 
 ---
 
 **Do not claim on camera:** that the official validator passed it (it was never
-available), that it is deployed (it is not), or that any figure came from
-anything other than this run.
+available), that it is deployed (it is not), that it has been built or run on
+Linux or Windows (it has not), or that any figure came from anything other than
+this run. If the recording overruns, cut the Repair segment before the Check
+segment — proving the answer matters more than showing another feature.

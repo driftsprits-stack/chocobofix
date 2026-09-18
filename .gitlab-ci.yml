@@ -1,0 +1,105 @@
+# CI for the GitLab repository required by PS1 §4.4.
+#
+# WRITTEN, NEVER RUN. No CI runner was available during development, and no
+# Linux build of this project has ever been produced. Treat the first pipeline
+# as the thing that proves the Linux path, not as a formality — it is entirely
+# possible that it fails the first time.
+#
+# The gates are deliberately ordered cheapest-first so a broken rule model is
+# caught before anything slow runs.
+
+stages: [build, test, evidence]
+
+default:
+  image: debian:12
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq build-essential cmake curl ca-certificates
+                             libsqlite3-dev libssl-dev python3 zip
+  cache:
+    key: ortools-9.14.6206
+    paths: [third_party/]
+
+build:
+  stage: build
+  script:
+    - ./scripts/fetch_deps.sh          # verifies the pinned SHA-256 of both deps
+    - cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-Wall -Wextra -Werror"
+    - cmake --build build -j"$(nproc)"
+  artifacts:
+    paths: [build/, third_party/]
+    expire_in: 1 day
+
+# The gate that matters most: our checker must still accept the organisers' own
+# sample. If this fails, the rule reconstruction has drifted and every score in
+# the repository is suspect.
+sample-corroboration:
+  stage: test
+  needs: [build]
+  script:
+    - ./build/check_sample
+
+rules-and-store:
+  stage: test
+  needs: [build]
+  script:
+    - ./build/test_core       # rules, rule-6 counterexamples, mutations, metamorphic
+    - ./build/test_store      # accounts, roles, approvals, concurrency
+
+integration:
+  stage: test
+  needs: [build]
+  script:
+    - ./tests/integration.sh build
+
+sanitizers:
+  stage: test
+  needs: []
+  script:
+    - ./scripts/fetch_deps.sh
+    - cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug
+        -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g"
+        -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
+    - cmake --build build-asan -j"$(nproc)" --target test_core check_sample test_store
+    - ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 ./build-asan/test_core
+    - ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 ./build-asan/check_sample
+    - ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=print_stacktrace=1 ./build-asan/test_store
+
+# Regenerates the public-instance results and fails if the objectives move.
+# Not a performance gate: it pins the answers, so a silent change to the rule
+# model cannot pass unnoticed.
+public-results:
+  stage: evidence
+  needs: [build]
+  script:
+    - ./build/trackaccess solve --data data/upstream/PS1/01_data --out out/ci
+        --scenario all --seconds 120 --workers 2
+    - |
+      python3 - <<'PY'
+      import json, sys
+      expect = {'A': 32.2, 'B': 30.0, 'C': 26.1}
+      bad = []
+      for s, want in expect.items():
+          d = json.load(open(f'out/ci/{s}/VALIDATION.json'))
+          got = d['soft_scores'].get('objective_score')
+          if not d['feasible']:
+              bad.append(f'{s}: INFEASIBLE')
+          elif abs(got - want) > 1e-9:
+              bad.append(f'{s}: objective {got}, expected {want}')
+      if bad:
+          print('The public-instance results moved:'); [print(' ', b) for b in bad]
+          print('Investigate before accepting the new numbers - see DEBUG_HANDOFF.md.')
+          sys.exit(1)
+      print('public-instance results unchanged: A 32.2, B 30.0, C 26.1, all feasible')
+      PY
+    - python3 tools/derive/crosscheck.py data/upstream/PS1/01_data out/ci/A
+    - python3 tools/derive/crosscheck.py data/upstream/PS1/01_data out/ci/B
+    - python3 tools/derive/crosscheck.py data/upstream/PS1/01_data out/ci/C
+    - python3 tools/derive/exposure.py
+  artifacts:
+    paths: [out/ci/]
+    expire_in: 1 week
+
+# No coverage threshold is configured. A number would be easy to add and easy to
+# hit without meaning anything; the mutation tests in test_core are the real
+# evidence that the checker checks something. See docs/REQUIREMENTS_MATRIX.md.

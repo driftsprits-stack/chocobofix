@@ -1,0 +1,38 @@
+# Mirror of .gitlab-ci.yml, for a GitHub remote.
+# WRITTEN, NEVER RUN — no Linux build of this project has ever been produced.
+name: build-and-test
+on: [push, pull_request]
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq
+             build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
+      - name: Cache pinned dependencies
+        uses: actions/cache@v4
+        with:
+          path: third_party
+          key: ortools-9.14.6206-${{ runner.os }}
+      - run: ./scripts/fetch_deps.sh
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - name: Our checker must still accept the organisers' sample
+        run: ./build/check_sample
+      - run: ./build/test_core
+      - run: ./build/test_store
+      - run: ./tests/integration.sh build
+
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/fetch_deps.sh
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ./build/check_sample
+      - run: ./build/test_core
+      - run: ./build/test_store
+      - run: ./tests/integration.sh build
