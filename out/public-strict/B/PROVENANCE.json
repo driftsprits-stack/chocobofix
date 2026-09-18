@@ -1,0 +1,5 @@
+{
+  "strict_buffers": true,
+  "fallback": false,
+  "supply_overrides": []
+}

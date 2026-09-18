@@ -6,6 +6,7 @@
 // wrapped in a transaction and reports success only after it commits.
 #pragma once
 
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -183,6 +184,16 @@ class Store {
 
  private:
   bool Exec(const std::string& sql, std::string* err);
+
+  // One connection, shared by every request thread. SQLite's own serialisation
+  // cannot be relied on (a build may be compiled multi-thread rather than
+  // serialized), and several calls here read connection-global state such as
+  // sqlite3_changes and sqlite3_last_insert_rowid immediately after a statement,
+  // which is only meaningful if no other thread ran one in between. So every
+  // public method takes this lock for its whole duration. SQLite is far faster
+  // than the solves this service exists to run; a coarse lock costs nothing here
+  // and removes the whole class of problem.
+  mutable std::recursive_mutex mu_;
   sqlite3* db_ = nullptr;
 };
 

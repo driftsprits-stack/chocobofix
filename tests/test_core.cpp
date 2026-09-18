@@ -335,6 +335,164 @@ int main() {
           "overrunning a planned date under Scenario B is rejected");
   }
 
+  // ------------------------------------------------- reviewed risk regressions
+  // One test per risk raised in the implementation brief's section 9. Each
+  // failed before the fix; none may regress silently.
+  Group("risk: horizon clamping");
+  {
+    // A planned start after the horizon used to be clamped backwards into the
+    // last week, quietly letting the work start earlier than the data allows.
+    const std::string dir = CopyInstance("beyond");
+    auto lines = ReadLines(dir + "/08_ACTIVITY_DETAILS.csv");
+    // horizon is 30 weeks from 2027-01-04; 2028-06-05 is far outside it.
+    lines[1] = "A001,C001,Renewal,SEC:BET:S15_S16:EB,SEC:BET:S16_S17:EB,2,2028-06-05,,2";
+    WriteLines(dir + "/08_ACTIVITY_DETAILS.csv", lines);
+    Instance bad;
+    std::vector<InputError> errs;
+    Check(!LoadInstance(dir, &bad, &errs),
+          "a planned start after the horizon is rejected, not clamped backwards");
+    bool explains = false;
+    for (const auto& e : errs)
+      if (e.message.find("after the") != std::string::npos &&
+          e.field == "planned_start_date") explains = true;
+    Check(explains, "  ... and the error says the activity could never be scheduled");
+    std::error_code ec; fs::remove_all(dir, ec);
+  }
+  {
+    // A date before the horizon is a different case: it just means "as early as
+    // the horizon allows", and must still load.
+    const std::string dir = CopyInstance("before");
+    auto lines = ReadLines(dir + "/08_ACTIVITY_DETAILS.csv");
+    lines[1] = "A001,C001,Renewal,SEC:BET:S15_S16:EB,SEC:BET:S16_S17:EB,2,2026-05-01,,2";
+    WriteLines(dir + "/08_ACTIVITY_DETAILS.csv", lines);
+    Instance early;
+    std::vector<InputError> errs;
+    Check(LoadInstance(dir, &early, &errs), "a planned start before the horizon still loads");
+    if (!errs.empty()) for (auto& e : errs) std::cout << "    " << e.Format() << "\n";
+    Eq(early.activities[early.activity_by_id.at("A001")].earliest_week, 1,
+       "  ... and becomes week 1");
+    std::error_code ec; fs::remove_all(dir, ec);
+  }
+  Eq(inst.WeekOf(*Date::Parse("2028-06-05")) > inst.horizon_weeks, true,
+     "WeekOf itself no longer clamps: a date past the horizon returns a later week");
+  Check(!inst.WeekInHorizon(inst.WeekOf(*Date::Parse("2028-06-05"))),
+        "  ... and WeekInHorizon reports it as outside");
+
+  Group("risk: access_seq and RESULTS are checked, not trusted");
+  {
+    Plan p = sample;
+    p.accesses[0].access_seq = 99;
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "a wrong access_seq is rejected");
+  }
+  {
+    Plan p = sample;
+    // Two accesses of one activity given the same sequence number.
+    ActIdx victim = p.accesses[0].activity;
+    int n = 0;
+    for (auto& a : p.accesses) if (a.activity == victim && n++ < 2) a.access_seq = 1;
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "a duplicated access_seq is rejected");
+  }
+  {
+    Plan p = sample;
+    Check(!p.results_rows.empty(), "the sample's RESULTS rows were read back");
+    p.results_rows[0].overrun_days += 7;          // claim more overrun than the schedule shows
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "an overrun_days that disagrees with the schedule is rejected");
+  }
+  {
+    Plan p = sample;
+    p.results_rows[0].simulated_completion_date =
+        Date{p.results_rows[0].simulated_completion_date.days + 7};
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0,
+          "a simulated_completion_date that disagrees with the schedule is rejected");
+  }
+  {
+    Plan p = sample;
+    p.results_rows.erase(p.results_rows.begin());
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "a contract missing from RESULTS.csv is rejected");
+  }
+  {
+    Plan p = sample;
+    p.results_rows.push_back(p.results_rows[0]);
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "a contract listed twice in RESULTS.csv is rejected");
+  }
+  {
+    Plan p = sample;
+    p.results_rows[0].scenario = "C";             // file says A
+    const auto r = Validate(inst, p);
+    Check(CountRule(r, "schema") > 0, "a RESULTS row naming a different scenario is rejected");
+  }
+
+  Group("risk: buffer zones that merely overlap");
+  {
+    // "Buffers never overlap" read literally rejects the shipped sample, so it
+    // is enforced only under the strict reading. Both halves are asserted so
+    // neither can drift: the default must accept, strict must reject.
+    ValidationOptions lenient, overlap;
+    overlap.no_zone_overlap = true;
+    const auto a = Validate(inst, sample, lenient);
+    const auto b = Validate(inst, sample, overlap);
+    Check(a.feasible, "the sample passes under the adopted reading");
+    Check(!b.feasible, "the sample fails once merely-touching zones are forbidden");
+    Check(CountRule(b, "buffer_overlap") > 0, "  ... on overlapping exclusion zones specifically");
+    Check(CountRule(a, "buffer_overlap") == 0, "  ... which the adopted reading does not raise");
+    // The three readings are strictly nested, so a plan clean under a stricter
+    // one is clean under a looser one.
+    Check(inst.exclusive_pairs.size() <= inst.exclusive_pairs_strict.size(),
+          "the strict exclusion set contains the adopted one");
+    Check(inst.exclusive_pairs_strict.size() <= inst.exclusive_pairs_no_overlap.size(),
+          "and the no-overlap set contains the strict one");
+  }
+
+  Group("risk: provenance travels with a repaired plan");
+  {
+    // A plan solved against reduced supply must be checked against that reduced
+    // supply. Exporting and re-reading must carry the disruption with it.
+    Plan p = sample;
+    const LocIdx loc = inst.location_by_id.at("SEC:BET:H01_H02:EB");
+    p.provenance.supply_overrides.emplace_back("SEC:BET:H01_H02:EB", 13, 0);
+    const std::string dir = (fs::temp_directory_path() / "ta_prov").string();
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+    std::string err;
+    Check(ExportPlan(inst, p, dir, &err), "a plan with provenance exports: " + err);
+    Check(fs::exists(dir + "/PROVENANCE.json"), "PROVENANCE.json is written beside the outputs");
+
+    Plan back;
+    std::vector<InputError> perr;
+    Check(LoadPlan(inst, dir, &back, &perr), "and is read back");
+    Eq(back.provenance.supply_overrides.size(), size_t(1), "the override survives the round trip");
+    Eq(EffectiveSupply(inst, back, loc, 13), 0, "the reduced supply is what a check now uses");
+    Eq(EffectiveSupply(inst, back, loc, 14), inst.locations[loc].supply_capacity,
+       "other weeks keep their nominal supply");
+    // With supply cut to zero in week 13, work there must now be over capacity.
+    const auto r = Validate(inst, back);
+    Check(CountRule(r, "capacity") > 0,
+          "work at a location whose supply the disruption removed is now a capacity breach");
+    fs::remove_all(dir, ec);
+  }
+
+  Group("risk: the checker does not reuse the solver's conflict set");
+  {
+    // Structural, and the reason the checker can catch a solver mistake at all:
+    // src/validator/validator.cpp must not mention exclusive_pairs. If it ever
+    // does again, the two stop being independent and this test says so.
+    std::string src;
+    Check(ReadFile("src/validator/validator.cpp", &src), "the checker source is readable");
+    // Look for actual use (`inst.exclusive_pairs`), not the identifier, which
+    // appears in the comment explaining why it is not used.
+    Check(src.find("inst.exclusive_pairs") == std::string::npos,
+          "the checker never consumes the solver's precomputed conflict pairs");
+    Check(src.find("plan.slots") != std::string::npos,
+          "  ... it works from the emitted occupancy and its co_share_group values");
+  }
+
   // ---------------------------------------------------------------- metamorphic
   Group("metamorphic");
   {

@@ -161,6 +161,12 @@ struct Instance {
   // times, which is the evidence against it.
   std::vector<std::pair<ActIdx, ActIdx>> exclusive_pairs_strict;
 
+  // A third, stricter set again: adds pairs whose exclusion zones merely touch,
+  // which is "buffers never overlap" read at face value. On the public instance
+  // NO schedule satisfies this - A and B are proven infeasible - so it exists to
+  // demonstrate that, not to be planned against. See docs/DERIVED_RULES.md R6d.
+  std::vector<std::pair<ActIdx, ActIdx>> exclusive_pairs_no_overlap;
+
   // Activities occupying each location, for the per-location-week capacity rows.
   std::vector<std::vector<ActIdx>> activities_at;
 
@@ -168,7 +174,12 @@ struct Instance {
   // plan to the exact bytes it was produced from.
   std::string input_hash;
 
-  Week WeekOf(Date d) const;          // 1-based; clamped to [1, horizon_weeks]
+  // 1-based, NOT clamped: a date after the horizon returns a week greater than
+  // horizon_weeks, and one before it returns a week below 1. Clamping a planned
+  // start backwards into the last week would silently let work start earlier
+  // than the data says, so callers must decide what an out-of-range week means.
+  Week WeekOf(Date d) const;
+  bool WeekInHorizon(Week w) const { return w >= 1 && w <= horizon_weeks; }
   Date SundayOfWeek(Week w) const;    // horizon_start + (w-1)*7 + 6
   const Contract& ContractOf(const Activity& a) const { return contracts[a.contract]; }
 };

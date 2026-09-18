@@ -16,6 +16,26 @@ struct Access {
   Week week = 0;
   bool eclo = false;
   int access_night = 0;   // 1..max_access_per_week, local to (contract, type, week)
+  int access_seq = 0;     // as written in the file; checked, not assumed
+};
+
+// A row of RESULTS.csv exactly as emitted, so the validator can recompute the
+// figures and compare rather than trusting them.
+struct ResultRow {
+  std::string scenario;
+  std::string contract_number;
+  Date simulated_completion_date{};
+  int overrun_days = 0;
+};
+
+// What a plan was produced against, beyond the instance itself. A repaired plan
+// was solved against changed supply, and checking it against nominal supply
+// would be checking a different question.
+struct Provenance {
+  std::vector<std::tuple<std::string, Week, int>> supply_overrides;  // location, week, supply
+  bool strict_buffers = false;
+  bool fallback = false;
+  std::string solver_detail;
 };
 
 struct Plan {
@@ -26,6 +46,9 @@ struct Plan {
   // activity to its 1-based slot index, rendered as "b1".."bN" on export.
   std::map<std::pair<LocIdx, Week>, std::map<ActIdx, int>> slots;
   std::map<std::pair<LocIdx, Week>, int> slots_used;
+
+  std::vector<ResultRow> results_rows;   // as read back from RESULTS.csv
+  Provenance provenance;
 };
 
 // Packs the activities present at each location-week into the fewest legal slots
@@ -61,6 +84,9 @@ Score ComputeScore(const Instance& inst, const Plan& plan);
 // Writes SCHEDULE_ACCESS.csv, SCHEDULE_OCCUPANCY.csv and RESULTS.csv into `dir`.
 // One scenario per directory: RESULTS.csv must never mix scenarios.
 bool ExportPlan(const Instance& inst, const Plan& plan, const std::string& dir, std::string* error);
+
+// Effective supply at a location-week, honouring any provenance override.
+int EffectiveSupply(const Instance& inst, const Plan& plan, LocIdx loc, Week week);
 
 // Reads back an exported plan. Used by the validator so that what is checked is
 // the bytes on disk, not the in-memory objects that produced them.

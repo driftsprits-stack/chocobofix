@@ -74,13 +74,22 @@ struct SolveOptions {
   // Costs score and may be unschedulable; provided so the cost of that reading
   // can be measured rather than assumed.
   bool strict_buffers = false;
+  // Enforce "buffers never overlap" at face value. Demonstrably unschedulable on
+  // the public instance; provided so that can be shown rather than argued.
+  bool no_zone_overlap = false;
 
   // Repair mode. When `baseline` is set, the search additionally prefers to keep
   // its assignments. This preference is NEVER part of the competition score:
   // SolveResult::score is always the scenario's own objective, recomputed from
   // the plan, and `churn` is reported separately.
   const Plan* baseline = nullptr;
-  int churn_weight_tenths = 0;
+
+  // Internal, set by Solve for its own second pass. `lock_objective_tenths`
+  // pins the competition objective at the value the first pass proved, and
+  // `minimize_churn` then makes churn the thing being minimised. Callers leave
+  // these alone.
+  long long lock_objective_tenths = -1;
+  bool minimize_churn = false;
   // Scenario C allows at most one excess access-night per location-week; B is
   // unbounded (scored, not failed); A permits none.
   bool log_search = false;

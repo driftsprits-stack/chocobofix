@@ -269,6 +269,29 @@ int RunWorker(const std::shared_ptr<Job>& job) {
 // Runs the worker synchronously for the short, interactive analyses (explain /
 // repair) and returns its captured output. Same process isolation and rlimits as
 // a solve; bounded by `seconds` so a request cannot occupy a thread indefinitely.
+// Interactive analyses are worker processes too, and must obey the same
+// concurrency bound as a solve. Without this, N simultaneous explain requests
+// would fork N workers and walk straight past --max-solves.
+class WorkerSlot {
+ public:
+  explicit WorkerSlot(std::chrono::milliseconds wait) {
+    std::unique_lock<std::mutex> lk(g_mu);
+    held_ = g_cv.wait_for(lk, wait, [] { return g_running < g_cfg.max_concurrent_solves; });
+    if (held_) ++g_running;
+  }
+  ~WorkerSlot() {
+    if (!held_) return;
+    { std::lock_guard<std::mutex> lk(g_mu); --g_running; }
+    g_cv.notify_all();
+  }
+  WorkerSlot(const WorkerSlot&) = delete;
+  WorkerSlot& operator=(const WorkerSlot&) = delete;
+  bool held() const { return held_; }
+
+ private:
+  bool held_ = false;
+};
+
 int RunWorkerSync(const std::vector<std::string>& argv_s, double seconds, std::string* output) {
   int pipefd[2];
   if (::pipe(pipefd) != 0) return -1;
@@ -1228,6 +1251,9 @@ int main(int argc, char** argv) {
     double seconds = 15;
     if (!req.get_param_value("seconds").empty())
       try { seconds = std::clamp(std::stod(req.get_param_value("seconds")), 1.0, 60.0); } catch (...) {}
+    WorkerSlot slot(std::chrono::seconds(5));
+    if (!slot.held())
+      return Deny(res, 429, "the solver is busy; try again in a moment");
     std::string out;
     const int rc = RunWorkerSync({g_cfg.worker, "explain", "--data", rec->dir,
                                   "--activity", act, "--week", week, "--scenario", scen,
@@ -1272,6 +1298,9 @@ int main(int argc, char** argv) {
                                      "--out", outdir, "--scenario", scen,
                                      "--seconds", std::to_string(seconds)};
     for (const auto& sp : specs) { argv.push_back("--supply"); argv.push_back(sp); }
+    WorkerSlot slot(std::chrono::seconds(5));
+    if (!slot.held())
+      return Deny(res, 429, "the solver is busy; try again in a moment");
     std::string out;
     const int rc = RunWorkerSync(argv, seconds, &out);
     g_store.Audit(me->id, "plan.repair", "instance", std::to_string(rec->id), rc == 0 ? "ok" : "failed",

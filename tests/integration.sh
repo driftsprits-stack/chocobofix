@@ -140,6 +140,58 @@ out=$(python3 tools/derive/exposure.py "$DATA" "$TMP/strict/A" 2>&1)
 echo "$out" | grep -qE "adopted: +0 +literal: +0" && ok "--strict-buffers output has 0 breaches under BOTH readings" \
   || no "--strict-buffers exposure: $out"
 
+echo "== risk: Scenario B must not be capped at four excess slots =="
+# Six PM activities at one capacity-1 location in one week need six possessions:
+# five in excess. B forbids overrun, so it must buy that excess. A hard cap of
+# four made this infeasible.
+"$BUILD/trackaccess" solve --data tests/data/micro_b --out "$TMP/bcap" --scenario B --seconds 30 \
+  >"$TMP/bcap.log" 2>&1
+chk "$?" "0" "Scenario B solves when it needs more than four excess access-nights"
+ex=$(python3 -c "
+import json;print(json.load(open('$TMP/bcap/B/VALIDATION.json'))['soft_scores']['excess_access_nights_total'])" 2>/dev/null)
+[ "${ex:-0}" -gt 4 ] && ok "  ... and actually spends $ex, above the old cap" || no "  excess spent: $ex"
+# The same instance under A, which forbids excess, must be PROVEN infeasible -
+# not merely reported as a timeout.
+"$BUILD/trackaccess" solve --data tests/data/micro_b --out "$TMP/acap" --scenario A --seconds 30 \
+  >"$TMP/acap.log" 2>&1
+grep -q "status: infeasible" "$TMP/acap.log" && ok "Scenario A on the same instance is proven infeasible" \
+  || no "Scenario A status: $(grep -o 'status: [a-z_]*' "$TMP/acap.log")"
+
+echo "== risk: a timeout is never reported as infeasibility =="
+# A budget of one second on a large synthetic instance either proves something
+# or reports that it did not - it must never claim impossibility it has not shown.
+python3 tools/derive/gen_stress.py data/upstream/PS1/01_data "$TMP/big" 4 >/dev/null 2>&1
+"$BUILD/trackaccess" solve --data "$TMP/big" --out "$TMP/bigout" --scenario C --seconds 1 --workers 1 \
+  >"$TMP/big.log" 2>&1
+st=$(grep -o 'status: [a-z_]*' "$TMP/big.log" | head -1 | cut -d' ' -f2)
+case "$st" in
+  optimal|feasible|infeasible|timeout_no_solution|cancelled)
+    ok "a one-second budget reports a defensible status ($st)";;
+  *) no "unexpected status '$st'";;
+esac
+if [ "$st" = "timeout_no_solution" ]; then
+  grep -q "not a proof" "$TMP/big.log" && ok "  ... and says explicitly that it is not a proof" \
+    || no "  timeout message does not disclaim proof"
+fi
+
+echo "== risk: minimal change is lexicographic, not a weight on the objective =="
+# The repaired plan must score exactly what the scenario scores, with churn
+# broken only between plans of equal objective.
+"$BUILD/trackaccess" repair --data "$DATA" --out "$TMP/lex" \
+  --supply "SEC:BET:H01_H02:EB@15=0" --scenario A --seconds 45 >"$TMP/lex.log" 2>&1
+chk "$?" "0" "repair completes"
+# Re-score the emitted plan from scratch; it must match what repair reported.
+rep=$(grep -oE 'objective [0-9]+\.[0-9]' "$TMP/lex.log" | tail -1 | cut -d' ' -f2)
+got=$(python3 -c "
+import json;print(json.load(open('$TMP/lex/VALIDATION.json'))['soft_scores']['objective_score'])" 2>/dev/null)
+# repair prints 'objective X  (+d)' for the after-plan; take that one.
+rep=$(grep -oE 'objective [0-9]+\.[0-9]+' "$TMP/lex.log" | tail -1 | cut -d' ' -f2)
+chk "$got" "$rep" "  the recomputed objective equals the reported one (no churn blended in)"
+[ -f "$TMP/lex/PROVENANCE.json" ] && ok "the disruption is recorded in PROVENANCE.json" \
+  || no "PROVENANCE.json written"
+grep -q "SEC:BET:H01_H02:EB" "$TMP/lex/PROVENANCE.json" && ok "  ... naming the affected location" \
+  || no "provenance names the location"
+
 echo "== service: shared-project layer over HTTP =="
 "$BUILD/trackaccess-service" --host 127.0.0.1 --port "$PORT" --root "$TMP/var" --web web \
   --worker "$BUILD/trackaccess" --public-instance "$DATA" > "$TMP/svc.log" 2>&1 &
@@ -174,6 +226,36 @@ chk "$(code "${AUTH[@]}" -X POST "$B/projects/$PID/jobs?instance_id=$IID&scenari
 VID=$(curl -s "${AUTH[@]}" "$B/projects/$PID/versions" | python3 -c 'import json,sys;d=json.load(sys.stdin)["versions"];print(d[0]["id"] if d else "")' 2>/dev/null)
 chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/SCHEDULE_ACCESS.csv")" "200" "a competition file downloads from a version"
 chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/ETC_PASSWD.csv")" "404" "a non-competition filename is refused"
+
+echo "== risk: interactive analyses obey the worker limit =="
+# Six explain requests at once, against a service allowing two concurrent
+# workers. Every one must be answered - some served, some refused with 429 -
+# and none may fork a worker past the bound.
+rm -f "$TMP/codes.txt"
+CPIDS=""
+for i in 1 2 3 4 5 6; do
+  curl -s -o /dev/null -w '%{http_code}\n' "${AUTH[@]}" -X POST \
+      "$B/instances/$IID/explain?activity=A004&week=21&scenario=A&seconds=8" \
+      >> "$TMP/codes.txt" 2>/dev/null &
+  CPIDS="$CPIDS $!"
+done
+# Wait only on the curls. A bare `wait` would also wait on the service, which
+# never exits.
+for pid in $CPIDS; do wait "$pid" 2>/dev/null; done
+codes=$(tr '\n' ' ' < "$TMP/codes.txt" 2>/dev/null)
+n_ok=$(tr ' ' '\n' <<< "$codes" | grep -c '^200$')
+n_busy=$(tr ' ' '\n' <<< "$codes" | grep -c '^429$')
+# The property that matters is that every request gets a real answer and the
+# service survives. Whether a given one is served or told the solver is busy
+# depends on timing; a crash or a dropped connection (000) is never acceptable.
+n_bad=$(tr ' ' '\n' <<< "$codes" | grep -c '^000$')
+if [ $((n_ok + n_busy)) -ge 6 ] && [ "$n_bad" -eq 0 ]; then
+  ok "six concurrent analyses all answered ($n_ok served, $n_busy told the solver is busy)"
+else
+  no "concurrent analyses: got '$codes' ($n_bad dropped connections)"
+fi
+after=$(curl -s "$B/health" | python3 -c 'import json,sys;print(json.load(sys.stdin)["status"])' 2>/dev/null)
+chk "$after" "ok" "  ... and the service is still healthy afterwards"
 
 echo "== the service survives a worker that dies =="
 JID2=$(curl -s "${AUTH[@]}" -X POST "$B/projects/$PID/jobs?instance_id=$IID&scenario=all&seconds=30" \

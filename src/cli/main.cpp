@@ -11,6 +11,7 @@
 #include <map>
 #include <set>
 #include <csignal>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -42,7 +43,7 @@ int Usage() {
       "usage:\n"
       "  trackaccess solve    --data DIR --out DIR [--scenario A|B|C|all]\n"
       "                       [--seconds N] [--workers N] [--seed N] [--log] [--fallback]\n"
-      "                       [--strict-buffers]\n"
+      "                       [--strict-buffers] [--no-zone-overlap]\n"
       "  trackaccess validate --data DIR --submission DIR\n"
       "  trackaccess diagnose --data DIR [--scenario A|B|C] [--seconds N]\n"
       "  trackaccess explain  --data DIR --activity ID --week N [--scenario A|B|C]\n"
@@ -83,6 +84,7 @@ int RunSolve(const std::vector<std::string>& args) {
   opts.log_search = Flag(args, "--log");
   const bool fallback = Flag(args, "--fallback");
   opts.strict_buffers = Flag(args, "--strict-buffers");
+  opts.no_zone_overlap = Flag(args, "--no-zone-overlap");
 
   std::cout << "instance " << data << "\n  activities=" << inst.activities.size()
             << " contracts=" << inst.contracts.size()
@@ -126,6 +128,9 @@ int RunSolve(const std::vector<std::string>& args) {
       worst = std::max(worst, 2);
       continue;
     }
+    res.plan.provenance.strict_buffers = opts.strict_buffers;
+    res.plan.provenance.fallback = used_fallback;
+    res.plan.provenance.solver_detail = res.solver_detail;
     std::string err;
     if (!ta::ExportPlan(inst, res.plan, dir, &err)) {
       std::cerr << "  export failed: " << err << "\n";
@@ -142,7 +147,10 @@ int RunSolve(const std::vector<std::string>& args) {
       worst = std::max(worst, 2);
       continue;
     }
-    const auto rep = ta::Validate(inst, reread);
+    ta::ValidationOptions vopts;
+    vopts.strict_buffers = opts.strict_buffers;
+    vopts.no_zone_overlap = opts.no_zone_overlap;
+    const auto rep = ta::Validate(inst, reread, vopts);
     std::cout << "  exported to " << dir << "\n";
     if (used_fallback) {
       std::cout << "  *** OUT OF POLICY: this plan breaches scenario "
@@ -347,8 +355,7 @@ int RunExplain(const std::vector<std::string>& args) {
 
   std::cout << "\n  with the access in week " << w << " required\n";
   opts.require = {{a, w}};
-  opts.baseline = &base.plan;
-  opts.churn_weight_tenths = 1;   // tie-break toward keeping the rest of the plan
+  opts.baseline = &base.plan;     // lexicographic tie-break toward the current plan
   auto test = ta::Solve(inst, opts, &g_cancel, nullptr);
   std::cout << "    " << ta::ToString(test.status) << "\n";
 
@@ -371,7 +378,6 @@ int RunExplain(const std::vector<std::string>& args) {
   std::cout << "\n  NO - proven impossible under the modelled rules. Which rule binds:\n";
   ta::SolveOptions probe = opts;
   probe.baseline = nullptr;
-  probe.churn_weight_tenths = 0;
   for (unsigned g : {ta::kRelaxBuffers, ta::kRelaxCapacity, ta::kRelaxWeekly,
                      ta::kRelaxPrecedence, ta::kRelaxStartWeek}) {
     probe.relax = g;
@@ -444,10 +450,10 @@ int RunRepair(const std::vector<std::string>& args) {
               << " -> " << o.supply << "\n";
 
   opts.supply_overrides = overrides;
+  // Minimal change is applied lexicographically: the scenario's objective is
+  // optimised first and then held, and churn is minimised within it. It cannot
+  // change which plans are optimal.
   opts.baseline = &base.plan;
-  // Small relative to the scenario's own penalties, so it only ever breaks ties
-  // between plans the competition objective scores equally.
-  opts.churn_weight_tenths = std::stoi(Arg(args, "--churn-weight", "1"));
 
   std::cout << "\n  after\n";
   auto rep = ta::Solve(inst, opts, &g_cancel, nullptr);
@@ -466,6 +472,15 @@ int RunRepair(const std::vector<std::string>& args) {
             << "  churn " << rep.churn << " activity-weeks\n\n  what moved\n";
   PrintDiff(inst, base.plan, rep.plan);
 
+  // The disruption is part of what this plan is an answer to, so it travels
+  // with the files. Without it the plan would later be checked, scored and
+  // published against supply it was never solved for.
+  for (const auto& o : overrides)
+    rep.plan.provenance.supply_overrides.emplace_back(
+        inst.locations[o.location].id, o.week, o.supply);
+  rep.plan.provenance.strict_buffers = opts.strict_buffers;
+  rep.plan.provenance.solver_detail = rep.solver_detail;
+
   std::error_code ec;
   std::filesystem::create_directories(out, ec);
   std::string err;
@@ -476,7 +491,14 @@ int RunRepair(const std::vector<std::string>& args) {
   ta::Plan reread;
   std::vector<ta::InputError> perrs;
   if (!ta::LoadPlan(inst, out, &reread, &perrs)) { std::cerr << "  re-read failed\n"; return 2; }
-  const auto v = ta::Validate(inst, reread);
+  ta::ValidationOptions vopts;
+  vopts.strict_buffers = opts.strict_buffers;
+  const auto v = ta::Validate(inst, reread, vopts);
+  {
+    const std::string jpath = out + "/VALIDATION.json";
+    FILE* f = std::fopen(jpath.c_str(), "wb");
+    if (f) { const std::string j = v.ToJson(inst); std::fwrite(j.data(), 1, j.size(), f); std::fclose(f); }
+  }
   std::cout << "\n  repaired plan exported to " << out << "; independent check: "
             << (v.feasible ? "FEASIBLE" : "HARD VIOLATIONS") << "\n";
   return v.feasible ? 0 : 3;
@@ -526,7 +548,10 @@ int RunValidate(const std::vector<std::string>& args) {
       std::cerr << "  " << errors[i].Format() << "\n";
     return 1;
   }
-  const auto rep = ta::Validate(inst, plan);
+  ta::ValidationOptions vopts;
+  vopts.strict_buffers = Flag(args, "--strict-buffers");
+  vopts.no_zone_overlap = Flag(args, "--no-zone-overlap");
+  const auto rep = ta::Validate(inst, plan, vopts);
   std::cout << rep.ToJson(inst) << "\n";
   return rep.feasible ? 0 : 3;
 }

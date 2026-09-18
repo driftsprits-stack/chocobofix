@@ -1,0 +1,7 @@
+activity_id,contract_number,activity_type,start_location_id,end_location_id,total_accesses,planned_start_date,predecessor_activity_id,activity_priority
+P01,C01,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3
+P02,C02,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3
+P03,C03,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3
+P04,C04,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3
+P05,C05,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3
+P06,C06,Renewal,SEC:ALP:S01_S02:EB,SEC:ALP:S01_S02:EB,1,2027-01-04,,3

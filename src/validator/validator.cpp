@@ -27,9 +27,12 @@ std::string JsonEscape(const std::string& s) {
 
 }  // namespace
 
-ValidationReport Validate(const Instance& inst, const Plan& plan) {
+ValidationReport Validate(const Instance& inst, const Plan& plan, ValidationOptions opts) {
   ValidationReport rep;
   rep.scenario = plan.scenario;
+  rep.strict_buffers = opts.strict_buffers || plan.provenance.strict_buffers;
+  rep.supply_overrides = static_cast<int>(plan.provenance.supply_overrides.size());
+  rep.fallback = plan.provenance.fallback;
   auto fail = [&](const char* rule, std::string detail) {
     rep.hard_violations.push_back({rule, "hard", std::move(detail)});
   };
@@ -102,6 +105,77 @@ ValidationReport Validate(const Instance& inst, const Plan& plan) {
       fail("occupancy", "wk" + std::to_string(k.second) + ": " + inst.activities[k.first].id +
                             " occupies locations without a matching access row");
 
+  // ---- access_seq is part of the schema, so it is checked ------------------
+  // Per activity, the sequence must run 1..n with no gaps or repeats, and must
+  // ascend with the week. An exporter that gets this wrong produces a file that
+  // parses but misrepresents the order of the work.
+  {
+    std::map<ActIdx, std::vector<std::pair<Week, int>>> seq;
+    for (const auto& a : plan.accesses) seq[a.activity].push_back({a.week, a.access_seq});
+    for (auto& [act, v] : seq) {
+      std::sort(v.begin(), v.end());
+      std::set<int> seen;
+      int prev_seq = 0;
+      for (size_t k = 0; k < v.size(); ++k) {
+        const int want = static_cast<int>(k) + 1;
+        if (v[k].second != want) {
+          std::ostringstream os;
+          os << inst.activities[act].id << ": access_seq " << v[k].second << " in wk"
+             << v[k].first << " should be " << want
+             << " (the sequence must run 1.." << v.size() << " in week order)";
+          fail("schema", os.str());
+        }
+        if (!seen.insert(v[k].second).second)
+          fail("schema", inst.activities[act].id + ": access_seq " +
+                             std::to_string(v[k].second) + " appears more than once");
+        if (v[k].second <= prev_seq && k > 0)
+          fail("schema", inst.activities[act].id + ": access_seq does not ascend with the week");
+        prev_seq = v[k].second;
+      }
+    }
+  }
+
+  // ---- RESULTS.csv is recomputed and compared, not trusted -----------------
+  {
+    const auto clast = ContractLastWeek(inst, plan);
+    std::map<std::string, const ResultRow*> rows;
+    for (const auto& r : plan.results_rows) {
+      if (r.scenario != std::string(ToString(plan.scenario)))
+        fail("schema", "RESULTS.csv row for " + r.contract_number + " says scenario \"" +
+                           r.scenario + "\" but the file is scenario " +
+                           std::string(ToString(plan.scenario)));
+      if (!rows.emplace(r.contract_number, &r).second)
+        fail("schema", "RESULTS.csv lists contract " + r.contract_number + " more than once");
+      if (!inst.contract_by_number.count(r.contract_number))
+        fail("schema", "RESULTS.csv lists contract " + r.contract_number +
+                           ", which is not in this instance");
+    }
+    for (size_t c = 0; c < inst.contracts.size(); ++c) {
+      const auto& con = inst.contracts[c];
+      auto it = rows.find(con.number);
+      if (clast[c] == 0) {
+        if (it != rows.end())
+          fail("schema", "RESULTS.csv reports a completion for " + con.number +
+                             ", which has no scheduled access");
+        continue;
+      }
+      if (it == rows.end()) {
+        fail("schema", "RESULTS.csv omits " + con.number + ", which has scheduled work");
+        continue;
+      }
+      const Date want_date = inst.SundayOfWeek(clast[c]);
+      const int want_over = std::max(0, static_cast<int>(want_date - con.planned_completion_date));
+      if (!(it->second->simulated_completion_date == want_date))
+        fail("schema", "RESULTS.csv gives " + con.number + " a completion of " +
+                           it->second->simulated_completion_date.ToIso() +
+                           "; the schedule says " + want_date.ToIso());
+      if (it->second->overrun_days != want_over)
+        fail("schema", "RESULTS.csv gives " + con.number + " an overrun of " +
+                           std::to_string(it->second->overrun_days) + " days; recomputed " +
+                           std::to_string(want_over));
+    }
+  }
+
   // ---- capacity (rule 5 / R2) --------------------------------------------
   // Scenario A: zero tolerance. C: at most one excess access-night per
   // location-week. B: excess is scored, never hard-failed.
@@ -109,14 +183,18 @@ ValidationReport Validate(const Instance& inst, const Plan& plan) {
                       : plan.scenario == Scenario::kC ? 1 : 1 << 30;
   for (const auto& [key, used] : plan.slots_used) {
     const auto& L = inst.locations[key.first];
-    const int excess = used - L.supply_capacity;
+    // Honour a repair's supply override: a disrupted plan must be checked
+    // against the supply it was actually produced for.
+    const int supply = EffectiveSupply(inst, plan, key.first, key.second);
+    const int excess = used - supply;
     if (excess > 0) {
       std::ostringstream os;
       os << "wk" << key.second << ": " << L.id << " uses " << used
-         << " access-nights against a supply of " << L.supply_capacity;
+         << " access-nights against a supply of " << supply
+         << (supply == L.supply_capacity ? "" : " (reduced by a recorded disruption)");
       rep.capacity_hotspots.push_back(os.str());
       if (excess > tolerance) fail("capacity", os.str());
-    } else if (used == L.supply_capacity) {
+    } else if (used == supply) {
       rep.capacity_hotspots.push_back("wk" + std::to_string(key.second) + ": " + L.id + " at capacity");
     }
   }
@@ -180,23 +258,95 @@ ValidationReport Validate(const Instance& inst, const Plan& plan) {
   }
 
   // ---- closures and buffers (rule 4 / R6) ---------------------------------
-  std::map<Week, std::set<ActIdx>> in_week;
-  for (const auto& a : plan.accesses) in_week[a.week].insert(a.activity);
-  for (const auto& [w, acts] : in_week) {
-    for (const auto& [i, j] : inst.exclusive_pairs) {
-      if (!acts.count(i) || !acts.count(j)) continue;
-      // Name a location that actually witnesses the breach.
-      std::string where;
-      const bool both_buffered = inst.activities[i].carries_buffer && inst.activities[j].carries_buffer;
-      auto witness = [&](const Activity& x, const Activity& y) {
-        for (LocIdx l : (both_buffered ? x.buffer_zone : x.closure))
-          if (std::binary_search(y.occupied.begin(), y.occupied.end(), l)) return inst.locations[l].id;
-        return std::string();
-      };
-      where = witness(inst.activities[i], inst.activities[j]);
-      if (where.empty()) where = witness(inst.activities[j], inst.activities[i]);
-      fail("closure", "wk" + std::to_string(w) + ": " + inst.activities[j].id +
-                          " inside closure of [" + inst.activities[i].id + "] at [" + where + "]");
+  // Computed here from the EMITTED occupancy and its actual co_share_group
+  // values. The solver's precomputed `exclusive_pairs` is deliberately NOT used:
+  // consuming it would make this check repeat whatever modelling error produced
+  // it, and the whole point of a separate checker is that it cannot.
+  {
+    // Which activities actually appear in each week, and where.
+    std::map<Week, std::map<ActIdx, std::map<LocIdx, int>>> present;
+    for (const auto& [key, m] : plan.slots)
+      for (const auto& [act, slot] : m) present[key.second][act][key.first] = slot;
+
+    auto zone_of = [&](ActIdx a, bool with_buffer) -> const std::vector<LocIdx>& {
+      return with_buffer ? inst.activities[a].buffer_zone : inst.activities[a].closure;
+    };
+    auto sorted_hit = [](const std::vector<LocIdx>& zone, const std::vector<LocIdx>& own,
+                         const std::vector<LocIdx>& other, LocIdx* where) {
+      for (LocIdx l : zone) {
+        if (std::binary_search(own.begin(), own.end(), l)) continue;
+        if (std::binary_search(other.begin(), other.end(), l)) { *where = l; return true; }
+      }
+      return false;
+    };
+
+    for (const auto& [w, acts] : present) {
+      for (auto i = acts.begin(); i != acts.end(); ++i) {
+        for (auto j = std::next(i); j != acts.end(); ++j) {
+          const ActIdx a = i->first, b = j->first;
+          const auto& A = inst.activities[a];
+          const auto& B = inst.activities[b];
+
+          // Possession grouping, read from the file rather than assumed. Two
+          // activities are one possession only where they are recorded in the
+          // SAME slot at a location they both occupy (rule 6, first clause).
+          bool same_possession = false, different_nights = false;
+          for (const auto& [loc, slot_a] : i->second) {
+            auto it = j->second.find(loc);
+            if (it == j->second.end()) continue;
+            if (it->second == slot_a) same_possession = true;
+            else different_nights = true;
+          }
+          // NOTE: co_share_group carries no meaning ACROSS locations. The brief
+          // calls it "an arbitrary label ... identifying which possession
+          // location the activity occupies", and the shipped sample puts the
+          // same pair in one slot at one location and different slots at
+          // another 45 times. So it identifies a slot at its own location and
+          // nothing more, and no cross-location night can be inferred from it.
+          // Requiring consistency across locations would reject the sample.
+          if (same_possession) continue;     // one possession here: exempt by rule 6
+          if (different_nights) continue;    // separate slots here (R6c)
+          (void)different_nights;
+
+          // No shared location, so nothing establishes that they are apart.
+          const bool both_buffered = A.carries_buffer && B.carries_buffer;
+          LocIdx where = kNoIndex;
+          bool clash = sorted_hit(zone_of(a, false), A.occupied, B.occupied, &where) ||
+                       sorted_hit(zone_of(b, false), B.occupied, A.occupied, &where);
+          if (!clash && both_buffered)
+            clash = sorted_hit(zone_of(a, true), A.occupied, B.occupied, &where) ||
+                    sorted_hit(zone_of(b, true), B.occupied, A.occupied, &where);
+
+          // "Buffers never overlap" read literally: two buffered possessions
+          // whose exclusion zones intersect at all are too close, even where
+          // neither zone reaches the other's worksite. Enforced only on request:
+          // the shipped sample breaches it seven times, AND enforcing it makes
+          // the public instance unschedulable outright (Scenarios A and B are
+          // then proven infeasible). See docs/DERIVED_RULES.md R6d.
+          if (!clash && both_buffered && opts.no_zone_overlap) {
+            const auto& za = A.buffer_zone;
+            const auto& zb = B.buffer_zone;
+            size_t x = 0, y = 0;
+            while (x < za.size() && y < zb.size()) {
+              if (za[x] == zb[y]) { clash = true; where = za[x]; break; }
+              if (za[x] < zb[y]) ++x; else ++y;
+            }
+            if (clash) {
+              std::ostringstream os;
+              os << "wk" << w << ": exclusion zones of " << A.id << " and " << B.id
+                 << " overlap at " << inst.locations[where].id;
+              fail("buffer_overlap", os.str());
+              continue;
+            }
+          }
+          if (clash) {
+            std::ostringstream os;
+            os << "wk" << w << ": " << B.id << " inside closure of [" << A.id << "] at ["
+               << (where == kNoIndex ? std::string("?") : inst.locations[where].id) << "]";
+            fail("closure", os.str());
+          }
+        }
+      }
     }
   }
 
@@ -257,6 +407,10 @@ std::string ValidationReport::ToJson(const Instance& inst) const {
   os << "  \"feasible\": " << (feasible ? "true" : "false") << ",\n";
   os << "  \"checker\": \"" << checker_version
      << "\",\n  \"checker_is_official_validator\": false,\n";
+  os << "  \"rule6_reading\": \"" << (strict_buffers ? "literal (strict)" : "adopted")
+     << "\",\n";
+  os << "  \"supply_overrides\": " << supply_overrides
+     << ",\n  \"produced_in_fallback_mode\": " << (fallback ? "true" : "false") << ",\n";
   os << "  \"input_hash\": \"" << inst.input_hash << "\",\n";
   os << "  \"hard_violations\": [";
   for (size_t i = 0; i < hard_violations.size(); ++i) {

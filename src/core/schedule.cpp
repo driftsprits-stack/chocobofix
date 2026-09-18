@@ -1,6 +1,7 @@
 #include "core/schedule.h"
 
 #include <algorithm>
+#include <cstdio>
 #include <sstream>
 
 namespace ta {
@@ -117,7 +118,8 @@ Score ComputeScore(const Instance& inst, const Plan& plan) {
                                   ActivityNudgeTenths(inst.activities[i].activity_priority) * days;
   }
   for (const auto& [key, used] : plan.slots_used)
-    s.excess_access_nights_total += std::max(0, used - inst.locations[key.first].supply_capacity);
+    s.excess_access_nights_total +=
+        std::max(0, used - EffectiveSupply(inst, plan, key.first, key.second));
 
   switch (plan.scenario) {
     case Scenario::kA:
@@ -186,7 +188,33 @@ bool ExportPlan(const Instance& inst, const Plan& plan, const std::string& dir, 
     }
     if (!w.Commit(error)) return false;
   }
+  // Provenance travels with the plan. A repaired plan checked against nominal
+  // supply is being checked against a question it was not asked.
+  {
+    std::ostringstream os;
+    os << "{\n  \"strict_buffers\": " << (plan.provenance.strict_buffers ? "true" : "false")
+       << ",\n  \"fallback\": " << (plan.provenance.fallback ? "true" : "false")
+       << ",\n  \"supply_overrides\": [";
+    for (size_t i = 0; i < plan.provenance.supply_overrides.size(); ++i) {
+      const auto& [loc, wk, sup] = plan.provenance.supply_overrides[i];
+      os << (i ? ",\n    " : "\n    ") << "{\"location_id\": \"" << loc
+         << "\", \"week\": " << wk << ", \"supply\": " << sup << "}";
+    }
+    os << (plan.provenance.supply_overrides.empty() ? "" : "\n  ") << "]\n}\n";
+    const std::string body = os.str();
+    const std::string path = dir + "/PROVENANCE.json";
+    FILE* f = std::fopen(path.c_str(), "wb");
+    if (!f) { *error = "cannot write " + path; return false; }
+    std::fwrite(body.data(), 1, body.size(), f);
+    std::fclose(f);
+  }
   return true;
+}
+
+int EffectiveSupply(const Instance& inst, const Plan& plan, LocIdx loc, Week week) {
+  for (const auto& [id, w, sup] : plan.provenance.supply_overrides)
+    if (w == week && inst.locations[loc].id == id) return sup;
+  return inst.locations[loc].supply_capacity;
 }
 
 bool LoadPlan(const Instance& inst, const std::string& dir, Plan* out,
@@ -215,6 +243,41 @@ bool LoadPlan(const Instance& inst, const std::string& dir, Plan* out,
   if (!sc) { results.AddError(2, "scenario", "expected A, B or C", errors); return false; }
   out->scenario = *sc;
 
+  // Keep the RESULTS rows as written; the validator recomputes and compares.
+  for (int r = 0; r < results.RowCount(); ++r) {
+    ResultRow row;
+    row.scenario = results.Str(r, "scenario", errors);
+    row.contract_number = results.Str(r, "contract_number", errors);
+    row.simulated_completion_date = results.DateOf(r, "simulated_completion_date", errors);
+    row.overrun_days = results.Int(r, "overrun_days", errors, 0, 100000);
+    out->results_rows.push_back(std::move(row));
+  }
+
+  // Provenance, when the producer wrote it. Absent means nominal supply.
+  {
+    std::string body;
+    if (ReadFile(dir + "/PROVENANCE.json", &body)) {
+      out->provenance.strict_buffers = body.find("\"strict_buffers\": true") != std::string::npos;
+      out->provenance.fallback = body.find("\"fallback\": true") != std::string::npos;
+      size_t pos = 0;
+      while ((pos = body.find("\"location_id\"", pos)) != std::string::npos) {
+        const auto q1 = body.find('"', body.find(':', pos) + 1);
+        const auto q2 = body.find('"', q1 + 1);
+        const auto wk = body.find("\"week\"", q2);
+        const auto sp = body.find("\"supply\"", q2);
+        if (q1 == std::string::npos || q2 == std::string::npos ||
+            wk == std::string::npos || sp == std::string::npos) break;
+        try {
+          out->provenance.supply_overrides.emplace_back(
+              body.substr(q1 + 1, q2 - q1 - 1),
+              std::stoi(body.substr(body.find(':', wk) + 1, 12)),
+              std::stoi(body.substr(body.find(':', sp) + 1, 12)));
+        } catch (...) {}
+        pos = q2 + 1;
+      }
+    }
+  }
+
   for (int r = 0; r < access.RowCount(); ++r) {
     Access a;
     const std::string id = access.Str(r, "activity_id", errors);
@@ -227,6 +290,7 @@ bool LoadPlan(const Instance& inst, const std::string& dir, Plan* out,
     a.week = access.Int(r, "week", errors, 1, inst.horizon_weeks);
     a.eclo = access.Int(r, "eclo", errors, 0, 1) == 1;
     a.access_night = access.Int(r, "access_night", errors, 1, 7);
+    a.access_seq = access.Int(r, "access_seq", errors, 1, 100000);
     out->accesses.push_back(a);
   }
 

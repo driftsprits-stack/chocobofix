@@ -2,6 +2,7 @@
 
 #include <sqlite3.h>
 
+#include <cstdio>
 #include <ctime>
 #include <algorithm>
 #include <memory>
@@ -11,6 +12,12 @@
 #include "service/crypto.h"
 
 namespace ta {
+
+// Taken at the top of every public Store method. Recursive because a few
+// methods legitimately call others (ApprovePlan reads PlanVersionById, and
+// disabling a user revokes its sessions).
+#define TA_STORE_LOCK() std::lock_guard<std::recursive_mutex> ta_store_guard(mu_)
+
 namespace {
 
 std::string NowIso() {
@@ -119,6 +126,12 @@ bool Store::Exec(const std::string& sql, std::string* err) {
 }
 
 bool Store::Open(const std::string& path, std::string* err) {
+  TA_STORE_LOCK();
+  // Recorded for the record: we hold our own lock regardless, so a
+  // non-serialized build is safe here, but it is worth knowing which one this is.
+  if (sqlite3_threadsafe() == 0)
+    std::fprintf(stderr, "note: SQLite built without thread safety; "
+                         "the store's own lock is what makes concurrent use safe\n");
   if (sqlite3_open(path.c_str(), &db_) != SQLITE_OK) {
     *err = "cannot open database at " + path;
     return false;
@@ -213,6 +226,7 @@ bool Store::Open(const std::string& path, std::string* err) {
 // --- users -----------------------------------------------------------------
 bool Store::CreateUser(const std::string& username, const std::string& password, Role role,
                        User* out, std::string* err) {
+  TA_STORE_LOCK();
   if (username.empty() || username.size() > 64) { *err = "username must be 1..64 characters"; return false; }
   for (char c : username)
     if (!std::isalnum(static_cast<unsigned char>(c)) && c != '.' && c != '_' && c != '-') {
@@ -234,6 +248,7 @@ bool Store::CreateUser(const std::string& username, const std::string& password,
 }
 
 std::optional<User> Store::FindUser(const std::string& username) {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT id,username,role,disabled,created_at FROM users WHERE username=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, username);
@@ -242,6 +257,7 @@ std::optional<User> Store::FindUser(const std::string& username) {
 }
 
 std::optional<User> Store::UserById(long long id) {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT id,username,role,disabled,created_at FROM users WHERE id=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, id);
@@ -250,6 +266,7 @@ std::optional<User> Store::UserById(long long id) {
 }
 
 std::vector<User> Store::ListUsers() {
+  TA_STORE_LOCK();
   std::vector<User> out;
   Stmt q(db_, "SELECT id,username,role,disabled,created_at FROM users ORDER BY username");
   if (!q.ok()) return out;
@@ -258,6 +275,7 @@ std::vector<User> Store::ListUsers() {
 }
 
 bool Store::SetUserDisabled(long long id, bool disabled, std::string* err) {
+  TA_STORE_LOCK();
   Stmt q(db_, "UPDATE users SET disabled=? WHERE id=?");
   if (!q.ok()) { *err = "prepare failed"; return false; }
   q.Bind(1, disabled ? 1 : 0);
@@ -268,6 +286,7 @@ bool Store::SetUserDisabled(long long id, bool disabled, std::string* err) {
 }
 
 bool Store::SetUserRole(long long id, Role role, std::string* err) {
+  TA_STORE_LOCK();
   Stmt q(db_, "UPDATE users SET role=? WHERE id=?");
   if (!q.ok()) { *err = "prepare failed"; return false; }
   q.Bind(1, std::string(ToString(role)));
@@ -279,6 +298,7 @@ bool Store::SetUserRole(long long id, Role role, std::string* err) {
 }
 
 bool Store::SetPassword(long long id, const std::string& password, std::string* err) {
+  TA_STORE_LOCK();
   if (password.size() < 12) { *err = "password must be at least 12 characters"; return false; }
   Stmt q(db_, "UPDATE users SET password_hash=? WHERE id=?");
   if (!q.ok()) { *err = "prepare failed"; return false; }
@@ -290,6 +310,7 @@ bool Store::SetPassword(long long id, const std::string& password, std::string* 
 }
 
 std::optional<User> Store::Authenticate(const std::string& username, const std::string& password) {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT id,username,role,disabled,created_at,password_hash FROM users WHERE username=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, username);
@@ -307,6 +328,7 @@ std::optional<User> Store::Authenticate(const std::string& username, const std::
 }
 
 int Store::UserCount() {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT COUNT(*) FROM users");
   if (!q.ok() || !q.Step()) return 0;
   return q.Int(0);
@@ -314,6 +336,7 @@ int Store::UserCount() {
 
 // --- sessions --------------------------------------------------------------
 std::string Store::CreateSession(long long user_id, int idle_seconds, int absolute_seconds) {
+  TA_STORE_LOCK();
   const std::string token = RandomToken(32);
   const long long now = static_cast<long long>(std::time(nullptr));
   Stmt q(db_, "INSERT INTO sessions(token_hash,user_id,created_at,last_seen,idle_expires_at,"
@@ -331,6 +354,7 @@ std::string Store::CreateSession(long long user_id, int idle_seconds, int absolu
 }
 
 std::optional<User> Store::UserForSession(const std::string& token) {
+  TA_STORE_LOCK();
   if (token.empty()) return std::nullopt;
   const std::string h = Sha256Hex(token);
   const long long now = static_cast<long long>(std::time(nullptr));
@@ -363,6 +387,7 @@ std::optional<User> Store::UserForSession(const std::string& token) {
 }
 
 void Store::RevokeSession(const std::string& token) {
+  TA_STORE_LOCK();
   Stmt q(db_, "DELETE FROM sessions WHERE token_hash=?");
   if (!q.ok()) return;
   q.Bind(1, Sha256Hex(token));
@@ -370,6 +395,7 @@ void Store::RevokeSession(const std::string& token) {
 }
 
 void Store::RevokeAllSessionsFor(long long user_id) {
+  TA_STORE_LOCK();
   Stmt q(db_, "DELETE FROM sessions WHERE user_id=?");
   if (!q.ok()) return;
   q.Bind(1, user_id);
@@ -377,6 +403,7 @@ void Store::RevokeAllSessionsFor(long long user_id) {
 }
 
 int Store::PurgeExpiredSessions() {
+  TA_STORE_LOCK();
   const long long now = static_cast<long long>(std::time(nullptr));
   Stmt q(db_, "DELETE FROM sessions WHERE idle_expires_at < ? OR absolute_expires_at < ?");
   if (!q.ok()) return 0;
@@ -387,6 +414,7 @@ int Store::PurgeExpiredSessions() {
 
 // --- projects --------------------------------------------------------------
 bool Store::CreateProject(const std::string& name, long long owner_id, Project* out, std::string* err) {
+  TA_STORE_LOCK();
   if (name.empty() || name.size() > 120) { *err = "project name must be 1..120 characters"; return false; }
   Stmt q(db_, "INSERT INTO projects(name,owner_id,revision,created_at) VALUES(?,?,1,?)");
   if (!q.ok()) { *err = "prepare failed"; return false; }
@@ -400,6 +428,7 @@ bool Store::CreateProject(const std::string& name, long long owner_id, Project* 
 }
 
 std::optional<Project> Store::ProjectById(long long id) {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT id,name,owner_id,revision,created_at FROM projects WHERE id=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, id);
@@ -411,6 +440,7 @@ std::optional<Project> Store::ProjectById(long long id) {
 }
 
 std::vector<Project> Store::ListProjects() {
+  TA_STORE_LOCK();
   std::vector<Project> out;
   Stmt q(db_, "SELECT id,name,owner_id,revision,created_at FROM projects ORDER BY id DESC");
   if (!q.ok()) return out;
@@ -426,6 +456,7 @@ std::vector<Project> Store::ListProjects() {
 // Compare-and-swap on the revision. A stale writer is rejected rather than
 // silently overwriting whatever arrived first.
 bool Store::BumpProjectRevision(long long id, long long expected_revision, std::string* err) {
+  TA_STORE_LOCK();
   Stmt q(db_, "UPDATE projects SET revision=revision+1 WHERE id=? AND revision=?");
   if (!q.ok()) { *err = "prepare failed"; return false; }
   q.Bind(1, id); q.Bind(2, expected_revision);
@@ -442,6 +473,7 @@ bool Store::BumpProjectRevision(long long id, long long expected_revision, std::
 
 // --- instances -------------------------------------------------------------
 bool Store::AddInstance(const InstanceRec& rec, InstanceRec* out, std::string* err) {
+  TA_STORE_LOCK();
   Stmt q(db_, "INSERT INTO instances(project_id,dir,input_hash,uploaded_by,created_at,label) "
               "VALUES(?,?,?,?,?,?)");
   if (!q.ok()) { *err = "prepare failed"; return false; }
@@ -453,6 +485,7 @@ bool Store::AddInstance(const InstanceRec& rec, InstanceRec* out, std::string* e
 }
 
 std::optional<InstanceRec> Store::InstanceById(long long id) {
+  TA_STORE_LOCK();
   Stmt q(db_, "SELECT id,project_id,dir,input_hash,uploaded_by,created_at,label FROM instances WHERE id=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, id);
@@ -464,6 +497,7 @@ std::optional<InstanceRec> Store::InstanceById(long long id) {
 }
 
 std::vector<InstanceRec> Store::ListInstances(long long project_id) {
+  TA_STORE_LOCK();
   std::vector<InstanceRec> out;
   Stmt q(db_, "SELECT id,project_id,dir,input_hash,uploaded_by,created_at,label FROM instances "
               "WHERE project_id=? ORDER BY id DESC");
@@ -480,6 +514,7 @@ std::vector<InstanceRec> Store::ListInstances(long long project_id) {
 
 // --- plan versions ---------------------------------------------------------
 bool Store::AddPlanVersion(const PlanVersion& pv, PlanVersion* out, std::string* err) {
+  TA_STORE_LOCK();
   int next = 1;
   {
     Stmt q(db_, "SELECT COALESCE(MAX(version_no),0)+1 FROM plan_versions WHERE project_id=? AND scenario=?");
@@ -503,6 +538,7 @@ bool Store::AddPlanVersion(const PlanVersion& pv, PlanVersion* out, std::string*
 }
 
 std::optional<PlanVersion> Store::PlanVersionById(long long id) {
+  TA_STORE_LOCK();
   Stmt q(db_, std::string("SELECT ") + kPvCols + " FROM plan_versions WHERE id=?");
   if (!q.ok()) return std::nullopt;
   q.Bind(1, id);
@@ -511,6 +547,7 @@ std::optional<PlanVersion> Store::PlanVersionById(long long id) {
 }
 
 std::vector<PlanVersion> Store::ListPlanVersions(long long project_id) {
+  TA_STORE_LOCK();
   std::vector<PlanVersion> out;
   Stmt q(db_, std::string("SELECT ") + kPvCols +
               " FROM plan_versions WHERE project_id=? ORDER BY id DESC");
@@ -523,6 +560,7 @@ std::vector<PlanVersion> Store::ListPlanVersions(long long project_id) {
 bool Store::ApprovePlan(long long version_id, long long approver_id,
                         const std::string& expect_content_hash,
                         const std::string& expect_validation_hash, std::string* err) {
+  TA_STORE_LOCK();
   auto pv = PlanVersionById(version_id);
   if (!pv) { *err = "no such plan version"; return false; }
 
@@ -592,6 +630,7 @@ bool Store::ApprovePlan(long long version_id, long long approver_id,
 
 bool Store::RevokeApproval(long long version_id, long long actor_id, const std::string& reason,
                            std::string* err) {
+  TA_STORE_LOCK();
   auto pv = PlanVersionById(version_id);
   if (!pv) { *err = "no such plan version"; return false; }
   if (pv->status != "approved") { *err = "this plan version is not approved"; return false; }
@@ -611,6 +650,7 @@ bool Store::RevokeApproval(long long version_id, long long actor_id, const std::
 }
 
 std::vector<Approval> Store::ListApprovals(long long project_id) {
+  TA_STORE_LOCK();
   std::vector<Approval> out;
   Stmt q(db_, "SELECT a.id,a.plan_version_id,a.approved_by,a.approved_at,a.content_hash,"
               "a.validation_hash,a.revoked,a.revoked_by,a.revoked_at,a.revoke_reason "
@@ -634,6 +674,7 @@ std::vector<Approval> Store::ListApprovals(long long project_id) {
 // were approved for conditions that no longer hold.
 int Store::InvalidateApprovalsForChangedInput(long long project_id, const std::string& new_input_hash,
                                               long long actor_id) {
+  TA_STORE_LOCK();
   Stmt q(db_, "UPDATE plan_versions SET status='invalidated' WHERE project_id=? "
               "AND input_hash<>? AND status IN ('approved','draft')");
   if (!q.ok()) return 0;
@@ -655,6 +696,7 @@ int Store::InvalidateApprovalsForChangedInput(long long project_id, const std::s
 void Store::Audit(long long actor_id, const std::string& action, const std::string& object_type,
                   const std::string& object_id, const std::string& result,
                   const std::string& correlation_id, const std::string& detail) {
+  TA_STORE_LOCK();
   Stmt q(db_, "INSERT INTO audit(ts,actor_id,action,object_type,object_id,result,correlation_id,"
               "detail) VALUES(?,?,?,?,?,?,?,?)");
   if (!q.ok()) return;
@@ -665,6 +707,7 @@ void Store::Audit(long long actor_id, const std::string& action, const std::stri
 
 std::vector<AuditEvent> Store::ListAudit(int limit, const std::string& object_type,
                                          const std::string& object_id) {
+  TA_STORE_LOCK();
   std::vector<AuditEvent> out;
   std::string sql = "SELECT a.id,a.ts,a.actor_id,COALESCE(u.username,''),a.action,a.object_type,"
                     "a.object_id,a.result,a.correlation_id,a.detail FROM audit a "

@@ -1,8 +1,11 @@
 {
   "scenario": "B",
   "feasible": true,
-  "checker": "trackaccess-check/0.1",
+  "checker": "trackaccess-check/0.2",
   "checker_is_official_validator": false,
+  "rule6_reading": "adopted",
+  "supply_overrides": 0,
+  "produced_in_fallback_mode": false,
   "input_hash": "52af39d328d856b597dab64b3e51e6ac40969c2aedd6a9888deed2f896f95e96",
   "hard_violations": [],
   "soft_scores": {

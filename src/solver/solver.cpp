@@ -145,11 +145,12 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   // minimum slot count exactly (see docs/DERIVED_RULES.md R3):
   //     slots >= n_PM + n_PC
   //   4*slots >= n_C + 4*n_PM + n_PC
-  int max_excess = opts.scenario == Scenario::kA ? 0
-                 : opts.scenario == Scenario::kC ? 1 : 4;
-  // In fallback mode the supply ceiling stops being a wall. It is still paid for
-  // at the scenario's own rate, plus the fallback surcharge below.
-  if (opts.soft_scenario_policy) max_excess = std::max(max_excess, 8);
+  // A permits none; C permits exactly one per location-week; B scores excess
+  // rather than capping it, so its bound must never bind. The largest number of
+  // possessions a location could need is one per activity that can occupy it,
+  // so that is the bound - it is a variable domain, not a policy.
+  int max_excess_default = opts.scenario == Scenario::kA ? 0
+                         : opts.scenario == Scenario::kC ? 1 : -1;   // -1 = unbounded
   std::map<std::pair<LocIdx, Week>, IntVar> excess;
   // A disruption replaces the nominal supply at specific location-weeks.
   std::map<std::pair<LocIdx, Week>, int> supply_at;
@@ -161,6 +162,10 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
     for (int w = 1; w <= H; ++w) {
       auto ov = supply_at.find({l, w});
       const int cap = ov == supply_at.end() ? inst.locations[l].supply_capacity : ov->second;
+      int max_excess = max_excess_default;
+      if (max_excess < 0) max_excess = static_cast<int>(acts.size());   // cannot bind
+      if (opts.soft_scenario_policy)
+        max_excess = std::max(max_excess, static_cast<int>(acts.size()));
       LinearExpr masters, weighted;
       for (ActIdx a : acts) {
         switch (inst.ContractOf(inst.activities[a]).access_type) {
@@ -191,7 +196,9 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   // share no location can never be proven to run on different nights, so they may
   // not share a week at all.
   if (!(opts.relax & kRelaxBuffers)) {
-    const auto& pairs = opts.strict_buffers ? inst.exclusive_pairs_strict : inst.exclusive_pairs;
+    const auto& pairs = opts.no_zone_overlap  ? inst.exclusive_pairs_no_overlap
+                      : opts.strict_buffers    ? inst.exclusive_pairs_strict
+                                               : inst.exclusive_pairs;
     for (const auto& [i, j] : pairs)
       for (int w = 1; w <= H; ++w) m.AddAtMostOne({x[i][w], x[j][w]});
   }
@@ -259,9 +266,12 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
   }
   (void)scores_overrun;
 
-  // Repair preference, kept strictly separate from the competition objective
-  // above: it only breaks ties between plans the scenario scores equally, and
-  // the score reported afterwards is recomputed from the plan without it.
+  // Repair preference. This is LEXICOGRAPHIC, not a weight: adding a churn term
+  // to the objective would change which plan is optimal, however small the
+  // weight, and the stated policy is that minimal change only breaks ties
+  // between plans the scenario scores equally. So the competition objective is
+  // minimised first, its optimum is then fixed as a constraint, and churn is
+  // minimised within that. Two solves, never one blended one.
   LinearExpr churn_expr;
   std::vector<std::vector<bool>> base(na, std::vector<bool>(H + 1, false));
   if (opts.baseline) {
@@ -271,9 +281,15 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
     for (int a = 0; a < na; ++a)
       for (int w = 1; w <= H; ++w)
         churn_expr += base[a][w] ? (LinearExpr(1) - x[a][w]) : LinearExpr(x[a][w]);
-    if (opts.churn_weight_tenths > 0) objective += opts.churn_weight_tenths * churn_expr;
   }
-  m.Minimize(objective);
+  if (opts.minimize_churn) {
+    // Second lexicographic pass: hold the competition objective at the optimum
+    // the first pass proved, and minimise how much of the baseline moves.
+    m.AddLessOrEqual(objective, static_cast<int64_t>(opts.lock_objective_tenths));
+    m.Minimize(churn_expr);
+  } else {
+    m.Minimize(objective);
+  }
 
   // --- search --------------------------------------------------------------
   operations_research::sat::Model model;
@@ -369,6 +385,27 @@ SolveResult Solve(const Instance& inst, const SolveOptions& opts,
                                                        : SolveStatus::kFeasible;
   if (cancel && cancel->load() && out.status != SolveStatus::kOptimal)
     out.message = "run stopped by operator; best complete plan found so far is returned";
+
+  // Lexicographic repair: the first pass has proven the scenario's optimum, so
+  // run a second pass that holds it and minimises churn. Only done when the
+  // first pass proved optimality - locking a merely-feasible objective would
+  // pin the plan to a value that is not the optimum, which is worse than not
+  // preferring minimal change at all. If the second pass fails for any reason,
+  // the first pass's plan stands.
+  if (opts.baseline && !opts.minimize_churn && out.status == SolveStatus::kOptimal) {
+    SolveOptions second = opts;
+    second.minimize_churn = true;
+    second.lock_objective_tenths = out.score.objective_tenths;
+    SolveResult refined = Solve(inst, second, cancel, nullptr);
+    if (refined.status == SolveStatus::kOptimal || refined.status == SolveStatus::kFeasible) {
+      if (refined.score.objective_tenths == out.score.objective_tenths) {
+        refined.status = out.status;            // optimality is the first pass's claim
+        refined.wall_seconds = out.wall_seconds + refined.wall_seconds;
+        refined.best_bound_tenths = out.best_bound_tenths;
+        return refined;
+      }
+    }
+  }
   return out;
 }
 

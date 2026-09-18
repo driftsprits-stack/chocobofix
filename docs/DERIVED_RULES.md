@@ -216,6 +216,43 @@ it reports 0 violations, the literal reading is dead. If it reports ~50, the
 adopted reading is dead and `--strict-buffers` becomes the default. Nothing short
 of that resolves it.
 
+## R6d. "Buffers never overlap" at face value — **refuted**
+
+> "Buffers never overlap — a `Live`/`Non-Live(Consist)` work whose buffer reaches,
+> say, `S02` pushes the next `Live`/`Non-Live(Consist)` work on that bound to
+> start no earlier than `S03`."
+
+Read at face value, the first clause forbids two buffered possessions whose
+exclusion zones touch at all, even where neither zone reaches the other's
+worksite. Two independent pieces of evidence refute that reading:
+
+1. The shipped sample breaches it **7 times**.
+2. **No schedule can satisfy it.** Enforcing it in the solver makes the public
+   instance infeasible: Scenarios A and B are *proven* infeasible and C does not
+   finish. A rule under which the published problem has no answer at all cannot
+   be the rule the problem is scored by.
+
+The second point is the stronger one, because it does not depend on the sample
+being current. Reproduce it with:
+
+```bash
+./build/trackaccess solve --data data/upstream/PS1/01_data --out /tmp/x \
+  --scenario A --seconds 30 --no-zone-overlap        # -> proven infeasible
+```
+
+What the clause is taken to mean instead is the *second* half of the sentence,
+which is concrete: a buffer pushes the next buffered work far enough away that it
+does not stand inside the buffered zone. That is R6b, and it is enforced.
+
+**Three nested readings are implemented**, so the cost of each is measurable
+rather than arguable:
+
+| Reading | Flag | Never-same-week pairs | Public instance |
+| --- | --- | --- | --- |
+| adopted | *(default)* | 58 | A 32.2 · B 30.0 · C 26.1 |
+| literal exemption (R6c) | `--strict-buffers` | 116 | A 93.8 · B 70.0 · C 87.7 |
+| zones may not touch (R6d) | `--no-zone-overlap` | 125 | **infeasible** |
+
 ## R7. Scoring — per-activity, not per-contract — PARTIALLY RESOLVED
 
 `priority_weighted_score = Σ_activities contract_weight(tier) × (1 + nudge) × overrun_days(activity)`

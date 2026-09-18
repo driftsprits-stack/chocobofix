@@ -77,7 +77,8 @@ std::string Date::ToIso() const {
 Week Instance::WeekOf(Date d) const {
   const std::int64_t off = d.days - horizon_start.days;
   const std::int64_t w = (off >= 0 ? off / 7 : (off - 6) / 7) + 1;
-  return static_cast<Week>(std::clamp<std::int64_t>(w, 1, horizon_weeks));
+  // Deliberately unclamped; see the declaration.
+  return static_cast<Week>(std::clamp<std::int64_t>(w, -100000, 100000));
 }
 
 Date Instance::SundayOfWeek(Week w) const {
@@ -329,6 +330,12 @@ bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
           strict = beyond(A.buffer_zone, A.occupied, B.occupied) ||
                    beyond(B.buffer_zone, B.occupied, A.occupied);
         if (strict) inst->exclusive_pairs_strict.emplace_back(i, j);
+        // "Buffers never overlap" at face value: zones that merely touch are too
+        // close. Kept as its own set because enforcing it makes the public
+        // instance unschedulable.
+        if (strict || (A.carries_buffer && B.carries_buffer &&
+                       intersects(A.buffer_zone, B.buffer_zone)))
+          inst->exclusive_pairs_no_overlap.emplace_back(i, j);
       }
       // Adopted reading: sharing a location settles the pair (identical group =
       // one possession; different group = provably different nights).
@@ -517,6 +524,16 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
     a.planned_start_date = activities.DateOf(r, "planned_start_date", errors);
     a.activity_priority = activities.Int(r, "activity_priority", errors, 1, 3);
     a.earliest_week = inst->WeekOf(a.planned_start_date);
+    if (a.earliest_week > inst->horizon_weeks) {
+      activities.AddError(r + 2, "planned_start_date",
+                          a.id + ": planned start " + a.planned_start_date.ToIso() +
+                              " falls in week " + std::to_string(a.earliest_week) +
+                              ", after the " + std::to_string(inst->horizon_weeks) +
+                              "-week horizon, so the activity could never be scheduled",
+                          errors);
+    }
+    // A start before the horizon simply means "as early as the horizon allows".
+    if (a.earliest_week < 1) a.earliest_week = 1;
     if (inst->activity_by_id.count(a.id)) {
       activities.AddError(r + 2, "activity_id", "duplicate activity \"" + a.id + "\"", errors);
       continue;
