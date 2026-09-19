@@ -85,7 +85,7 @@ jobs:
       - run: npm --prefix client run build
       - run: cd client && npx playwright install --with-deps chromium
       - run: npm --prefix client run test:e2e
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: browser-results
