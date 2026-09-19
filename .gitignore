@@ -11,6 +11,7 @@ build/
 build-*/
 third_party/
 web-dist/
+node_modules/
 client/node_modules/
 client/coverage/
 client/test-results/
@@ -21,11 +22,14 @@ out/
 *.sqlite
 *.sqlite-*
 *.db
+*.db-wal
+*.db-shm
 *.log
 
 *.pem
 *.key
 *.p12
 *.pfx
+service-account*.json
 *.zip
 __MACOSX/

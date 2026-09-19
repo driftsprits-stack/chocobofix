@@ -1,0 +1,5 @@
+name: chocobofix-codeql
+paths-ignore:
+  - third_party/**
+  - build/**
+  - web-dist/**

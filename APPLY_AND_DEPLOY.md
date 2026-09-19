@@ -44,10 +44,14 @@ Review the files in this package. Then commit them:
 ```sh
 git add CMakeLists.txt Dockerfile src/service/main.cpp .gitignore .github docs APPLY_AND_DEPLOY.md
 git commit -m "Fix solver runtime packaging and worker diagnostics"
-git push -u origin fix/worker-runtime
+git remote -v
+git push -u github fix/worker-runtime
 ```
 
-Open a pull request. Require the CI checks to pass before merge. Do not commit
+In the current local repository, `github` is the remote for
+`https://github.com/driftsprits-stack/chocobofix.git`. The remote named
+`origin` points to another local folder and does not publish to GitHub. Open a
+pull request into `master`. Require the CI checks to pass before merge. Do not commit
 `.env` files, passwords, tokens, databases, private keys, or live backups.
 
 ## 4. Configure build values

@@ -30,7 +30,7 @@ and plan files to durable storage.
 | Retention and deletion | Not implemented | Set approved periods for accounts, sessions, uploads, plans, audit records, logs, and backups. Add scheduled deletion and a legal-hold process. |
 | Regulatory compliance | Not certified | A Singapore operator must review PDPA duties, name a DPO contact, record purposes, and define breach response. Obtain legal review before production use. |
 | Audit trail | Implemented | The store records actor, action, object, result, correlation ID, and time for security and planning actions. |
-| Tamper-evident audit | Not implemented | Database rows can be changed by a privileged database operator. Add a hash chain and send signed checkpoints to separately controlled immutable storage. Test verification and recovery. |
+| Tamper-evident audit | Partial | Audit events form a SHA-256 chain and the service can verify it. A privileged database operator can still rewrite the rows and recompute the chain. Export signed checkpoints to separately controlled immutable storage for stronger evidence. |
 | Error handling | Implemented, improved | API failures use bounded messages. Worker failures now distinguish fork, setup, `exec`, runtime-loader, exit-code, and signal failures. Worker output is bounded and keeps a final partial line. |
 | Retry, backoff, idempotency | Partial | Safe client reads have request deduplication and bounded caching. Mutations are not retried. Add server idempotency keys before automatic mutation retry. No payment or subscription path exists. |
 | Circuit breakers and fallback | Not applicable to current integrations | The application has no remote business API. Add a circuit breaker if a remote dependency becomes part of the request path. Solver fallback plans are marked as not submission-ready. |
@@ -38,7 +38,7 @@ and plan files to durable storage.
 | Cache and invalidation | Implemented in client | The cache is bounded and immutable. Login-session changes cancel requests and clear cached data. Mutations invalidate affected data. API replies use `no-store`. |
 | Integration, regression, end-to-end | Implemented | Native, store, integration, browser, and independent validation tests exist. CI must require them before merge. |
 | Load, stress, chaos | Partial | Concurrent worker tests exist. Production-scale load, dependency failure, disk-full, restart, and restore tests still need recorded results. |
-| Coverage thresholds | Implemented for named client modules | The client gate reports 94.73% statements and 88.59% branches for the transport and schedule modules. This is not whole-product coverage. |
+| Coverage thresholds | Implemented for named client modules | The current clean run reports 93.75% statements and 87.41% branches for the configured transport and schedule modules. This is not whole-product coverage. |
 | RTO and RPO | Not measured | Set targets, then run a timed restore drill. Do not publish an RTO or RPO before a successful drill. |
 | Disaster recovery | Partial | An offline backup and restore script exists in the full repository. Cloud Run local storage is not durable. Use a durable database and object store before production use. |
 | Accessibility | Implemented baseline | The client has landmarks, skip links, visible focus, keyboard forms, responsive navigation, reduced motion, text alternatives, and automated checks. Complete physical-device and screen-reader tests. |
@@ -87,7 +87,7 @@ Complete these gates in this order:
 2. Move state from the Cloud Run file system to a supported durable design.
 3. Add and test tenant boundaries, or keep one organisation per deployment.
 4. Configure the real site URL, operator, DPO contact, and retention periods.
-5. Add tamper-evident audit checkpoints in separately controlled storage.
+5. Export signed audit-chain checkpoints to separately controlled immutable storage.
 6. Configure edge rate limits, monitoring, alerts, log retention, and spending budgets.
 7. Run load, restart, disk-full, dependency-failure, and timed restore tests.
 8. Require CI, review, and branch protection before merge.
