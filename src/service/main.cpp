@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -230,6 +231,23 @@ int RunWorker(const std::shared_ptr<Job>& job) {
     rl.rlim_cur = rl.rlim_max = 256u * 1024 * 1024;      // no runaway output files
     ::setrlimit(RLIMIT_FSIZE, &rl);
     ::execv(g_cfg.worker.c_str(), argv.data());
+    // This runs only after execv fails. stderr is already connected to the job
+    // log, so preserve the operating-system reason instead of returning a
+    // context-free exit code.
+    int exec_errno = errno;
+    const char prefix[] = "worker exec failed with errno ";
+    ::write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
+    char digits[16];
+    size_t count = 0;
+    do {
+      digits[count++] = static_cast<char>('0' + exec_errno % 10);
+      exec_errno /= 10;
+    } while (exec_errno > 0 && count < sizeof(digits));
+    for (size_t i = 0; i < count / 2; ++i)
+      std::swap(digits[i], digits[count - i - 1]);
+    ::write(STDERR_FILENO, digits, count);
+    const char newline = '\n';
+    ::write(STDERR_FILENO, &newline, 1);
     ::_exit(127);
   }
   ::close(pipefd[1]);
@@ -416,7 +434,11 @@ void WorkerLoop() {
       else if (rc == 3) { job->state = "failed"; job->error = "the produced plan did not pass the independent check"; }
       else if (rc == 1) { job->state = "failed"; job->error = "the instance was rejected; see the log"; }
       else if (rc == -2) { job->state = "failed"; job->error = "the solver process terminated abnormally; the service is unaffected"; }
-      else { job->state = "failed"; job->error = "worker process could not be started"; }
+      else if (rc == 127) {
+        job->state = "failed";
+        job->error = "solver startup failed; check the worker log and runtime libraries";
+      }
+      else { job->state = "failed"; job->error = "worker process failed with exit code " + std::to_string(rc) + "; see the log"; }
       --g_running;
     }
     g_cv.notify_all();

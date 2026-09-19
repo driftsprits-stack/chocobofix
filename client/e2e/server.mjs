@@ -1,0 +1,10 @@
+import { spawn } from 'node:child_process';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
+const root = mkdtempSync(join(tmpdir(), 'chocobofix-browser-'));
+const child = spawn(resolve('../build/trackaccess-service'), ['--host','127.0.0.1','--port','8189','--root',root,'--web',resolve('../web-dist'),'--worker',resolve('../build/trackaccess'),'--public-instance',resolve('../data/upstream/PS1/01_data')], { stdio:'inherit' });
+let closing = false;
+const close = () => { if (!closing) { closing=true; child.kill('SIGTERM'); } };
+process.on('SIGTERM',close); process.on('SIGINT',close);
+child.on('exit',code => { rmSync(root,{recursive:true,force:true}); process.exit(code || 0); });

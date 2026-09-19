@@ -1,7 +1,8 @@
 # Deployment
 
-**Nothing is deployed and no hosted URL exists.** This file records the path that
-was tested, the parts that were not, and exactly what is needed to finish.
+The public service runs on Google Cloud Run at
+`https://chocobofix-53566346633.asia-southeast1.run.app`. This file records how
+to publish a new revision and how to verify it before judges use it.
 
 ---
 
@@ -31,7 +32,8 @@ Reproduce it:
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -keyout /tmp/ta-key.pem -out /tmp/ta-cert.pem \
   -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
-./build/trackaccess-service --host 127.0.0.1 --port 8098 --root /tmp/depl --web ./web \
+npm ci --prefix client && npm run build --prefix client
+./build/trackaccess-service --host 127.0.0.1 --port 8098 --root /tmp/depl --web ./web-dist \
   --worker ./build/trackaccess --public-instance ./data/upstream/PS1/01_data \
   --bootstrap-admin "admin.ada:administrator-pass-1" &
 python3 deploy/tls_proxy.py --cert /tmp/ta-cert.pem --key /tmp/ta-key.pem \
@@ -39,14 +41,11 @@ python3 deploy/tls_proxy.py --cert /tmp/ta-cert.pem --key /tmp/ta-key.pem \
 TA_CA=/tmp/ta-cert.pem python3 tests/test_multiuser.py https://localhost:8443
 ```
 
-## What was NOT tested
+## Limits that remain
 
-- **No Linux build was produced or run.** Only arm64 macOS. `scripts/fetch_deps.sh`
-  selects a Linux OR-Tools asset and the CMake configuration is portable, but
-  that path is unverified.
-- **`deploy/Dockerfile` has never been built.** No container runtime was
-  available. It is written from the steps that were executed by hand, and marks
-  itself unverified.
+- A local Linux container build was not available on the development Mac. The
+  Cloud Run build uses Linux, and the final Docker image now runs the sample
+  validator before it can be released.
 - **`deploy/trackaccess.service`, `Caddyfile` and `nginx.conf` were written, not
   run.** Only the proxy *shape* was verified, with a different proxy.
 - **No automatic certificate issuance was exercised.** The test used a
@@ -55,50 +54,32 @@ TA_CA=/tmp/ta-cert.pem python3 tests/test_multiuser.py https://localhost:8443
 
 ---
 
-## What I need from you to finish this
+## Update the existing Cloud Run service
 
-Deliverable §4.2 needs a URL a judge can open. Any **one** of the following is
-enough. **A custom domain is not required** — every option below gives a working
-hostname.
+Use Google Cloud Shell, or any machine where `gcloud` is signed in to the Google
+account that owns the service:
 
-### Option A — a container host (least work)
+```bash
+git clone https://github.com/driftsprits-stack/chocobofix.git
+cd chocobofix
+gcloud config set project YOUR_PROJECT_ID
+gcloud run deploy chocobofix --source . --region asia-southeast1 \
+  --allow-unauthenticated --min 1 --max 1
+```
 
-A Fly.io, Render, Railway, or equivalent account, and either the CLI logged in
-on this machine or a deploy token. These give a hostname such as
-`trackaccess.fly.dev` or `trackaccess.onrender.com`, with TLS handled for you.
+Cloud Run detects the root `Dockerfile`, builds it, and sends all traffic to the
+new revision after the container starts successfully. The build fails if the
+solver cannot load OR-Tools or validate the supplied sample.
 
-What I need: **an account and a deploy credential.** Then `deploy/Dockerfile`
-gets built (for the first time) and pushed.
+Use one minimum and one maximum instance for the hackathon demo. The application
+currently stores SQLite data and uploaded files on the instance filesystem. A
+new revision starts with an empty store, and more than one instance can split
+users and projects. Replace this storage with a managed database and object
+store before using the service as a durable production system.
 
-Note: the image needs ~1 GB RAM to build OR-Tools' dependencies and ~512 MB to
-run comfortably. A free tier that caps at 256 MB will not hold a solve.
-
-### Option B — a Linux VM
-
-Any provider (Hetzner, DigitalOcean, Lightsail, an institutional VM). Needs:
-
-- 2 vCPU, 2 GB RAM, 10 GB disk — a small instance is enough; the public instance
-  solves in under a second and peaks near 104 MB.
-- Ports 80 and 443 reachable.
-- A hostname. The provider's default reverse-DNS name works if Caddy can get a
-  certificate for it; otherwise a free subdomain (DuckDNS, nip.io) is fine.
-- SSH access for me, or you run the commands and I supply them.
-
-What I need: **SSH access, or your willingness to run about eight commands.**
-
-### Option C — an institutional or existing server
-
-If your school or the organisers provide hosting, I need the access method and
-whether inbound 443 is permitted. If it sits behind an internal CA, that is
-supported: install the CA certificate in the host trust store. **Never disable
-certificate verification to work around an expiry** — that turns a visible,
-fixable problem into a silent one.
-
-### In every case
-
-Tell me **the judge account policy**. Judges need to sign in, because an
-unauthenticated solver endpoint would be an open compute service and uploaded
-datasets would not be protected. The intended arrangement is:
+Judges need to sign in because an unauthenticated solver endpoint would be an
+open compute service and uploaded datasets would not be protected. The intended
+arrangement is:
 
 - one `planner` account per judging panel, credentials given in the submission;
 - each judge's uploads live in their own project, invisible to other planners
@@ -106,9 +87,10 @@ datasets would not be protected. The intended arrangement is:
 - the bundled public instance is loadable in one click, so nothing has to be
   uploaded just to see the tool work.
 
-If the organisers require genuinely anonymous access, say so and I will add a
-time-boxed, rate-limited guest role — but that is a deliberate weakening and
-should be a decision, not a default.
+After a fresh deployment, the first visitor creates the first administrator.
+That administrator can create planner accounts in **Settings → accounts**. To
+replace a debug administrator, create a second administrator, sign in as that
+account, and disable the old account from the same page.
 
 ---
 

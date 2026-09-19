@@ -44,11 +44,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && useradd --system --home /var/lib/trackaccess --create-home trackaccess
 WORKDIR /opt/chocobofix
 COPY --from=build /src/build/trackaccess /src/build/trackaccess-service ./build/
-COPY --from=build /src/third_party/or-tools_* ./third_party/
+# The solver is dynamically linked to the OR-Tools bundle. Give that bundle a
+# stable runtime path instead of retaining CMake's build-stage /src path.
+COPY --from=build /src/third_party/or-tools_*/lib/ /opt/ortools/lib/
+ENV LD_LIBRARY_PATH=/opt/ortools/lib
 # The React build is the interface that ships. web/ is the superseded frontend
 # and is deliberately not copied; see docs/FRONTEND_MIGRATION.md.
 COPY --from=client /web-dist ./web
 COPY --from=build /src/data/upstream/PS1/01_data ./data/public
+COPY --from=build /src/data/upstream/PS1/03_submission_sample ./data/sample
+# Test the exact solver binary and library layout that the final image ships.
+RUN ./build/trackaccess validate \
+      --data ./data/public \
+      --submission ./data/sample
 USER trackaccess
 VOLUME ["/var/lib/trackaccess"]
 EXPOSE 8080

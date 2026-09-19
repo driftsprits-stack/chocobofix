@@ -20,9 +20,9 @@ in memory.
 | Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
 | Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
 | Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 120 core + 94 store + 132 integration/security, ASan+UBSan clean |
+| Tests | 120 core + 102 store + 181 integration/security + 48 frontend, ASan+UBSan clean |
 | Multi-user | accounts, roles, sessions, plan versions, validation-bound approvals, audit — all through the interface |
-| Hosted deployment | **not deployed** — see [Deployment](#deployment). No URL exists yet. |
+| Hosted deployment | [Cloud Run](https://chocobofix-53566346633.asia-southeast1.run.app/) — see [Deployment](#deployment) |
 | Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
 
 Objective scores on the public instance (lower is better; every term is a penalty):
@@ -71,6 +71,8 @@ Homebrew formula.
 ./scripts/fetch_deps.sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+npm ci --prefix client
+npm run build --prefix client
 ```
 
 `fetch_deps.sh` downloads OR-Tools 9.14.6206 for the host triple and
@@ -79,9 +81,10 @@ cpp-httplib 0.18.3, printing and verifying SHA-256 for both. Roughly 46 MB.
 ### 3. Prove the build before trusting it
 
 ```bash
-./build/test_core        # 90 checks: rules, counterexamples, mutations
-./build/test_store       # 91 checks: accounts, roles, approvals, concurrency
+./build/test_core        # 120 checks: rules, counterexamples, mutations
+./build/test_store       # accounts, roles, approvals, concurrency
 ./build/check_sample     # our checker must accept the organisers' own sample
+npm run check --prefix client
 ```
 
 If any of those fail, stop — something in the rule model or the store changed.
@@ -91,14 +94,14 @@ If any of those fail, stop — something in the rule model or the store changed.
 Single planner, offline, on this machine:
 
 ```bash
-./build/trackaccess-service   --host 127.0.0.1 --port 8080   --root ./var   --web ./web   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data
+./build/trackaccess-service   --host 127.0.0.1 --port 8080   --root ./var   --web ./web-dist   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data
 ```
 
 Then open **http://127.0.0.1:8080/**. With no accounts yet, the sign-in screen
 offers to create the first administrator. To skip that prompt:
 
 ```bash
-./build/trackaccess-service   --host 127.0.0.1 --port 8080 --root ./var --web ./web   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data   --bootstrap-admin "admin:choose-a-long-password"
+./build/trackaccess-service   --host 127.0.0.1 --port 8080 --root ./var --web ./web-dist   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data   --bootstrap-admin "admin:choose-a-long-password"
 ```
 
 `--bootstrap-admin` is ignored once any account exists. Other options:
@@ -106,7 +109,7 @@ offers to create the first administrator. To skip that prompt:
 `--session-max` (28800).
 
 The administrator then creates `planner`, `approver` and `viewer` accounts from
-the **Accounts** tab. Those four roles are what the workflow below assumes.
+**Settings → accounts**. Those four roles are what the workflow below assumes.
 
 For a shared or hosted deployment, put TLS in front and follow
 `docs/DEPLOYMENT.md`. The service binds loopback by default and warns if told
@@ -294,7 +297,7 @@ ctest --test-dir build               # runs the three C++ suites under CTest
 | x86_64 macOS | not built | not run | `fetch_deps.sh` selects the right asset; unverified |
 | x86_64 / arm64 Linux | **not built** | **not run** | CMake is portable and an OR-Tools asset is selected, but nothing was compiled or executed |
 | Windows | not attempted | — | no configuration written |
-| Container image | **never built** | — | `deploy/Dockerfile` is unverified; see `docs/DEPLOYMENT.md` |
+| Container image | built by Cloud Run | final image validates the solver and its OR-Tools runtime before release |
 
 | Feature | Status |
 | --- | --- |
@@ -305,9 +308,9 @@ ctest --test-dir build               # runs the three C++ suites under CTest
 | Plan versions, validation-bound approvals, revocation, invalidation | tested |
 | Optimistic concurrency, audit trail | tested |
 | Four-language interface | 302 strings x 4 languages, none missing; **ms/zh/ta unreviewed by a fluent speaker** |
-| TLS-terminated hosted shape | tested locally with a throwaway certificate; **not deployed** |
+| TLS-terminated hosted shape | deployed on Cloud Run; Google terminates HTTPS |
 | Backup / restore | procedure written; **restore never rehearsed** |
-| CI | **none configured** |
+| CI | GitHub Actions runs native and frontend checks on pushes and pull requests |
 
 Sanitizers:
 
@@ -322,10 +325,21 @@ Measured results are in `docs/TEST_REPORT.md`.
 
 ## Deployment
 
-**Nothing is deployed. No hosted URL exists.** The service is ready to run behind
-a reverse proxy; the exact procedure, including TLS termination and the
-certificate rotation note, is in `docs/DEPLOYMENT.md`. That step needs hosting
-credentials this project does not have, so it is left for the operator.
+The public service is
+[chocobofix-53566346633.asia-southeast1.run.app](https://chocobofix-53566346633.asia-southeast1.run.app/).
+To update the existing Cloud Run service from a clean checkout:
+
+```bash
+gcloud config set project YOUR_PROJECT_ID
+gcloud run deploy chocobofix --source . --region asia-southeast1 \
+  --allow-unauthenticated --min 1 --max 1
+```
+
+The root `Dockerfile` builds the React client and C++ service. Its final image
+also runs the sample validator, so deployment stops before release if the solver
+or an OR-Tools runtime library is missing. Keep one instance for this hackathon
+deployment because the current SQLite store is local to the Cloud Run instance.
+See `docs/DEPLOYMENT.md` for verification and account setup.
 
 ## Repository layout
 
@@ -335,7 +349,8 @@ src/solver/      CP-SAT model for Scenarios A / B / C
 src/validator/   independent conformance checker (shares no constraint code)
 src/cli/         trackaccess command line
 src/service/     HTTP application service, job queue, worker supervision
-web/             browser interface (no framework, no build step, 4 languages)
+client/          React browser interface and frontend tests
+web/             superseded static interface retained for reference
 tests/           unit, mutation, metamorphic, integration and security tests
 tools/derive/    re-runnable rule-derivation and cross-check scripts
 docs/            derived rules, architecture, requirements matrix, test report

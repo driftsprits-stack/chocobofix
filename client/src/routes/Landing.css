@@ -1,0 +1,97 @@
+/* The introduction gets a viewport of breathing room, as the brief asks. The
+   working screens do not - they are dense on purpose. */
+
+.lede {
+  min-height: 100svh;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  padding-block: clamp(1.5rem, 4vh, 3rem);
+}
+
+.masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--gap-4);
+}
+
+/* Asymmetry: the headline is flush left and the body column sits to its right,
+   below the optical centre. On a phone they stack and the offset collapses. */
+.lede-body {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--gap-5);
+  align-content: center;
+  padding-block: var(--gap-7);
+}
+
+@media (min-width: 900px) {
+  .lede-body { grid-template-columns: minmax(0, 1.45fr) minmax(0, 1fr); gap: var(--gap-7); }
+  .lede-aside { align-self: end; padding-bottom: 0.9rem; }
+}
+
+.lede h1 { max-width: 12ch; }
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gap-3);
+  margin-top: var(--gap-5);
+}
+
+.beats {
+  display: grid;
+  gap: 0;
+  margin-top: var(--gap-6);
+  border-top: 1px solid var(--rule);
+}
+
+.beat {
+  display: grid;
+  grid-template-columns: 2.5rem 1fr;
+  gap: var(--gap-4);
+  padding-block: var(--gap-4);
+  border-bottom: 1px solid var(--rule);
+  align-items: baseline;
+}
+
+@media (min-width: 720px) {
+  .beats { grid-template-columns: repeat(4, 1fr); border-bottom: 1px solid var(--rule); }
+  .beat {
+    grid-template-columns: 1fr;
+    gap: var(--gap-2);
+    border-bottom: 0;
+    border-left: 0;
+    padding-inline: var(--gap-4);
+    padding-block: var(--gap-5);
+  }
+  .beat:first-child { border-left: 0; padding-left: 0; }
+}
+
+.beat-n { font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--fs-label); }
+
+/* ------------------------------------------------- the opening sequence */
+/* Headline, then the rule drawing itself, then the supporting copy. Transform
+   and opacity only. The actions are never gated behind it - they are in the DOM
+   and clickable from the first frame. */
+
+@media (prefers-reduced-motion: no-preference) {
+  :root:not([data-motion="reduced"]) .reveal {
+    animation: rise var(--t-section) var(--ease) both;
+    animation-delay: var(--d, 0ms);
+  }
+  :root:not([data-motion="reduced"]) .draw {
+    transform-origin: left center;
+    animation: draw var(--t-section) var(--ease) both;
+    animation-delay: var(--d, 0ms);
+  }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(0.6rem); }
+  to   { opacity: 1; transform: none; }
+}
+@keyframes draw {
+  from { transform: scaleX(0); }
+  to   { transform: scaleX(1); }
+}

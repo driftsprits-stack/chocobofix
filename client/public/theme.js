@@ -1,0 +1,1 @@
+try { const p=JSON.parse(localStorage.getItem('chocobofix.prefs')||'{}'); document.documentElement.dataset.theme=['dark','system'].includes(p.theme)?p.theme:'light'; if(p.theme==='system') document.documentElement.removeAttribute('data-theme'); } catch { document.documentElement.dataset.theme='light'; }

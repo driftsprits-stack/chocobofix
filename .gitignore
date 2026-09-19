@@ -36,3 +36,7 @@ service-account*.json
 client/coverage/
 client/test-results/
 client/playwright-report/
+
+# Local submission bundles are generated artifacts, not source files.
+submission-final/
+submission-strict/
