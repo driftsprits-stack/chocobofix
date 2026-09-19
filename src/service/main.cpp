@@ -384,9 +384,14 @@ ProcessResult RunWorker(const std::shared_ptr<Job>& job) {
       ChildExitWithError(error_pipe[1], kChildDupStderr);
     ::close(output_pipe[1]);
     rlimit rl{};
+#if !defined(__APPLE__)
+    // RLIMIT_AS is unreliable with macOS virtual-memory mappings.
     rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(memory_mb) * 1024 * 1024;
     if (::setrlimit(RLIMIT_AS, &rl) != 0)
       ChildExitWithError(error_pipe[1], kChildMemoryLimit);
+#else
+    (void)memory_mb;
+#endif
     rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(seconds * 4 + 60);
     if (::setrlimit(RLIMIT_CPU, &rl) != 0)
       ChildExitWithError(error_pipe[1], kChildCpuLimit);
@@ -496,9 +501,14 @@ int RunWorkerSync(const std::vector<std::string>& argv_s, double seconds, std::s
       ChildExitWithError(error_pipe[1], kChildDupStderr);
     ::close(output_pipe[1]);
     rlimit rl{};
+#if !defined(__APPLE__)
+    // RLIMIT_AS is unreliable with macOS virtual-memory mappings.
     rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(memory_mb) * 1024 * 1024;
     if (::setrlimit(RLIMIT_AS, &rl) != 0)
       ChildExitWithError(error_pipe[1], kChildMemoryLimit);
+#else
+    (void)memory_mb;
+#endif
     rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(seconds * 8 + 60);
     if (::setrlimit(RLIMIT_CPU, &rl) != 0)
       ChildExitWithError(error_pipe[1], kChildCpuLimit);
