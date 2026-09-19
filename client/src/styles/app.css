@@ -109,7 +109,7 @@ input[type='file']::file-selector-button { font: inherit; color: var(--ink); bac
 .board-table th:nth-child(4) { width: 22%; }
 .board-table th:nth-child(5) { width: 14%; }
 .board-table td { padding-block: 1.15rem; }
-.board-table tbody tr { transition: background var(--t-control) var(--ease); }
+.board-table tbody tr { transition: none; }
 .board-table tbody tr.timing-row-early { box-shadow: inset 3px 0 0 var(--timing-early); }
 .board-table tbody tr.timing-row-on-time { box-shadow: inset 3px 0 0 var(--timing-on-time); }
 .board-table tbody tr.timing-row-late { box-shadow: inset 3px 0 0 var(--timing-late); }
@@ -195,9 +195,8 @@ input[type='file']::file-selector-button { font: inherit; color: var(--ink); bac
 .project-name { font-size: 1.5rem; letter-spacing: -.04em; }
 .workspace-footer { margin-top: 5rem; border-top: 1px solid var(--rule); padding-top: 1rem; display: flex; justify-content: space-between; gap: 1rem; font-size: .875rem; }
 .empty-state { padding: 3rem 0; }
-.back-to-top { position: fixed; left: 50%; bottom: max(1rem, env(safe-area-inset-bottom)); z-index: 45; display: inline-flex; align-items: center; gap: .45rem; min-height: 44px; padding: .65rem 1rem; border: 1px solid var(--ink); border-radius: 999px; background: var(--ink); color: var(--ground); box-shadow: 0 10px 30px rgb(0 0 0 / .14); transform: translateX(-50%); animation: top-control-in var(--t-control) var(--ease) both; }
+.back-to-top { position: fixed; left: 50%; bottom: max(1rem, env(safe-area-inset-bottom)); z-index: 45; display: inline-flex; align-items: center; gap: .45rem; min-height: 44px; padding: .65rem 1rem; border: 1px solid var(--ink); border-radius: 0; background: var(--ink); color: var(--ground); box-shadow: none; transform: translateX(-50%); }
 .back-to-top:hover { background: var(--ground); color: var(--ink); }
-@keyframes top-control-in { from { opacity: 0; transform: translate(-50%, 8px); } to { transform: translate(-50%, 0); } }
 @media (prefers-reduced-motion: no-preference) {
   :root:not([data-motion='reduced']) .page-head,
   :root:not([data-motion='reduced']) .auth-story { animation: editorial-enter var(--t-section) var(--ease) both; }

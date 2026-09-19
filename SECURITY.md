@@ -1,31 +1,35 @@
 # Security policy
 
-## Reporting a vulnerability
+## Report a vulnerability
 
-Do not open a public issue for a vulnerability that could expose credentials,
-uploaded project data, or a running deployment. Contact the repository owner
-privately through the account that publishes this repository. Add a dedicated
-security contact here before public deployment.
+Do not open a public issue for a vulnerability that can expose credentials or project data. Contact the repository owner through the GitHub account that publishes this repository. Add a public security email before production use.
 
-Include the affected version, a concise reproduction, impact, and any suggested
-mitigation. Do not include real passwords, session tokens, or private planning
-files.
+Include the affected commit, the steps to reproduce the issue, the impact, and a proposed fix. Do not send real passwords, session tokens, or private railway files.
 
-## Supported state
+## Supported version
 
-This project is under active development. Security fixes apply to the current
-default branch. No long-term support releases are published.
+Security fixes apply to the current `master` branch. The project has no long-term support release.
 
-## Deployment boundaries
+## Controls in this repository
 
-The service binds to loopback by default and does not terminate TLS itself. A
-public deployment must use an HTTPS reverse proxy, restrict the data directory,
-and keep secrets outside the repository.
+- The service uses prepared SQLite statements and strict input limits.
+- Passwords use PBKDF2-HMAC-SHA256 with a unique salt.
+- Only session token hashes are stored.
+- Sessions have idle and absolute expiry times.
+- The server checks roles and project access on every protected route.
+- Login, write, queue, upload, CPU, memory, and output limits are bounded.
+- The browser rejects cross-site writes. The service sends CSP, HSTS, frame, MIME, referrer, opener, and resource-policy headers.
+- Audit events contain a SHA-256 chain. The service can verify this chain.
+- GitHub secret scanning and push protection are active. CI runs tests, coverage gates, `npm audit`, and CodeQL. Dependabot opens update pull requests.
 
-The current design supports one organisation per installation. Project-level
-authorisation does not provide isolation between separate customer
-organisations. Audit records are ordinary database rows and are not
-tamper-evident.
+## Limits
 
-See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for deployment checks and
-[docs/REQUIREMENTS_MATRIX.md](docs/REQUIREMENTS_MATRIX.md) for known gaps.
+This release supports one organisation per deployment. Project ownership isolates planners inside that organisation. It is not multi-tenant software.
+
+The Cloud Run deployment stores SQLite data and uploaded files on the container file system. A new revision starts with empty data. This is acceptable for the hackathon demonstration. It is not durable production storage.
+
+The audit hash chain detects an unexpected changed or missing event. A database administrator can rewrite the rows and recompute the chain. Export the final hash to an external append-only log for stronger evidence.
+
+The application has no payment, refund, analytics, advertising, or third-party embed feature.
+
+See `docs/RELEASE_AUDIT.md` for the complete status and `docs/DEPLOYMENT.md` for deployment controls.

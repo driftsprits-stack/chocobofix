@@ -267,6 +267,8 @@ int main() {
           "the event resolves the actor's name");
     Check(!ev[0].ts.empty(), "the event carries a timestamp");
     Check(!ev[0].correlation_id.empty(), "and a correlation id");
+    Check(!ev[0].event_hash.empty(), "the event is included in the audit hash chain");
+    Check(s.VerifyAuditChain(&err), "the audit hash chain verifies");
     auto none = s.ListAudit(50, "plan_version", "999999");
     Eq(none.size(), size_t(0), "an object with no events returns none");
   }

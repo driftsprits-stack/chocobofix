@@ -31,7 +31,6 @@
 #include "httplib.h"
 #include "service/crypto.h"
 #include "service/store.h"
-#include "service/crypto.h"
 #include "validator/validator.h"
 
 namespace fs = std::filesystem;
@@ -708,6 +707,9 @@ int main(int argc, char** argv) {
     res.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.set_header("X-Content-Type-Options", "nosniff");
     res.set_header("X-Frame-Options", "DENY");
+    res.set_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    res.set_header("Cross-Origin-Opener-Policy", "same-origin");
+    res.set_header("Cross-Origin-Resource-Policy", "same-origin");
     res.set_header("Referrer-Policy", "no-referrer");
     res.set_header("Content-Security-Policy",
                    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
@@ -1319,7 +1321,9 @@ int main(int argc, char** argv) {
          << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
          << "," << Q("result") << ":" << Q(e.result)
          << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
-         << "," << Q("detail") << ":" << Q(e.detail) << "}";
+         << "," << Q("detail") << ":" << Q(e.detail)
+         << "," << Q("previous_hash") << ":" << Q(e.previous_hash)
+         << "," << Q("event_hash") << ":" << Q(e.event_hash) << "}";
       first = false;
     }
     os << "]}";
@@ -1345,7 +1349,9 @@ int main(int argc, char** argv) {
          << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
          << "," << Q("result") << ":" << Q(e.result)
          << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
-         << "," << Q("detail") << ":" << Q(e.detail) << "}";
+         << "," << Q("detail") << ":" << Q(e.detail)
+         << "," << Q("previous_hash") << ":" << Q(e.previous_hash)
+         << "," << Q("event_hash") << ":" << Q(e.event_hash) << "}";
       first = false;
     }
     os << "]}";

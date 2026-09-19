@@ -125,6 +125,8 @@ struct AuditEvent {
   std::string result;
   std::string correlation_id;
   std::string detail;
+  std::string previous_hash;
+  std::string event_hash;
 };
 
 class Store {
@@ -193,6 +195,7 @@ class Store {
              const std::string& correlation_id, const std::string& detail);
   std::vector<AuditEvent> ListAudit(int limit, const std::string& object_type,
                                     const std::string& object_id);
+  bool VerifyAuditChain(std::string* err);
 
   // --- coordinator assignments ------------------------------------------
   // Scoped to project + instance + activity id. `coordinator_id` of 0 clears

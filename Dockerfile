@@ -1,6 +1,14 @@
 # Google Cloud Run build entry point.
 FROM node:22-slim AS client
 WORKDIR /client
+ARG VITE_SITE_URL=https://chocobofix-53566346633.asia-southeast1.run.app
+ARG VITE_OPERATOR_NAME=ChocoboFix
+ARG VITE_OPERATOR_COUNTRY=
+ARG VITE_CONTACT_EMAIL=
+ENV VITE_SITE_URL=$VITE_SITE_URL \
+    VITE_OPERATOR_NAME=$VITE_OPERATOR_NAME \
+    VITE_OPERATOR_COUNTRY=$VITE_OPERATOR_COUNTRY \
+    VITE_CONTACT_EMAIL=$VITE_CONTACT_EMAIL
 COPY client/package.json client/package-lock.json ./
 RUN npm ci --no-audit --no-fund
 COPY client/ ./

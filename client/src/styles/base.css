@@ -118,8 +118,6 @@ a {
   display: inline-flex;
   align-items: center;
   gap: 0.6em;
-  transition: background var(--t-control) var(--ease),
-              color var(--t-control) var(--ease);
 }
 .btn:hover { background: transparent; color: var(--ink); }
 
@@ -135,12 +133,7 @@ a {
   cursor: not-allowed;
 }
 
-/* A simple arrow is sufficient; it shifts on hover to say "this goes somewhere". */
-.arrow {
-  display: inline-block;
-  transition: transform var(--t-control) var(--ease);
-}
-.btn:hover .arrow, a:hover .arrow { transform: translateX(0.25em); }
+.arrow { display: inline-block; }
 
 label { display: block; font-size: var(--fs-label); color: var(--muted); }
 

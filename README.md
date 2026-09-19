@@ -372,3 +372,7 @@ this repository:
 SHA-256 of both is printed and verified by `scripts/fetch_deps.sh`.
 The PS1 instance data under `data/upstream/` belongs to the problem authors and
 is vendored unmodified at commit `966c976`.
+
+## Release and security status
+
+See [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md) for the verified control matrix, known limits, missing operator details, and production work that remains. See [`SECURITY.md`](SECURITY.md) for private vulnerability reporting and security boundaries.

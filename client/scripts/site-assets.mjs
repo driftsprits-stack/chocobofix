@@ -6,7 +6,7 @@ let origin='';
 if(env.VITE_SITE_URL) { const u=new URL(env.VITE_SITE_URL); if(u.protocol!=='https:') throw Error('VITE_SITE_URL must use HTTPS'); origin=u.origin; }
 const escape=s=>s.replaceAll('&','&amp;').replaceAll('"','&quot;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 const root=resolve('../web-dist');
-const paths=['/','/terms','/privacy','/cookies'];
+const paths=['/','/signin','/sample','/terms','/privacy','/cookies'];
 writeFileSync(resolve(root,'robots.txt'),`User-agent: *\nDisallow: /api/\n${origin ? `Sitemap: ${origin}/sitemap.xml\n` : ''}`);
 writeFileSync(resolve(root,'sitemap.xml'),`<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">${origin ? paths.map(p=>`<url><loc>${escape(origin+p)}</loc></url>`).join('') : ''}</urlset>\n`);
 if(origin) {

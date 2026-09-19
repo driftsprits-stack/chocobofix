@@ -89,6 +89,19 @@ const char* kPvCols =
     "feasible,violations,objective_tenths,content_hash,validation_hash,input_hash,"
     "is_fallback,strict_buffers,status,approved_by,approved_at";
 
+std::string AuditHash(const std::string& previous_hash, const std::string& ts,
+                      long long actor_id, const std::string& action,
+                      const std::string& object_type, const std::string& object_id,
+                      const std::string& result, const std::string& correlation_id,
+                      const std::string& detail) {
+  auto field = [](const std::string& value) {
+    return std::to_string(value.size()) + ":" + value;
+  };
+  return Sha256Hex(field(previous_hash) + field(ts) + field(std::to_string(actor_id)) +
+                   field(action) + field(object_type) + field(object_id) + field(result) +
+                   field(correlation_id) + field(detail));
+}
+
 }  // namespace
 
 std::string_view ToString(Role r) {
@@ -154,7 +167,7 @@ bool Store::Open(const std::string& path, std::string* err) {
             "PRAGMA foreign_keys=ON;"
             "PRAGMA busy_timeout=5000;", err)) return false;
 
-  return Exec(R"SQL(
+  if (!Exec(R"SQL(
     CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -229,7 +242,9 @@ bool Store::Open(const std::string& path, std::string* err) {
       object_id TEXT NOT NULL,
       result TEXT NOT NULL,
       correlation_id TEXT NOT NULL,
-      detail TEXT NOT NULL);
+      detail TEXT NOT NULL,
+      previous_hash TEXT NOT NULL DEFAULT '',
+      event_hash TEXT NOT NULL DEFAULT '');
     CREATE INDEX IF NOT EXISTS ix_audit_object ON audit(object_type, object_id);
 
     -- Who coordinates an activity. Communication metadata: it does not assert
@@ -258,7 +273,20 @@ bool Store::Open(const std::string& path, std::string* err) {
       media_type TEXT NOT NULL,
       bytes      BLOB NOT NULL,
       updated_at TEXT NOT NULL);
-  )SQL", err);
+  )SQL", err)) return false;
+
+  // Older stores predate the hash chain. Keep those rows as legacy records and
+  // start the verifiable chain with the first event written after migration.
+  auto has_audit_column = [&](const std::string& name) {
+    Stmt q(db_, "PRAGMA table_info(audit)");
+    while (q.ok() && q.Step()) if (q.Text(1) == name) return true;
+    return false;
+  };
+  if (!has_audit_column("previous_hash") &&
+      !Exec("ALTER TABLE audit ADD COLUMN previous_hash TEXT NOT NULL DEFAULT ''", err)) return false;
+  if (!has_audit_column("event_hash") &&
+      !Exec("ALTER TABLE audit ADD COLUMN event_hash TEXT NOT NULL DEFAULT ''", err)) return false;
+  return true;
 }
 
 // --- users -----------------------------------------------------------------
@@ -757,11 +785,20 @@ void Store::Audit(long long actor_id, const std::string& action, const std::stri
                   const std::string& object_id, const std::string& result,
                   const std::string& correlation_id, const std::string& detail) {
   TA_STORE_LOCK();
+  std::string previous_hash;
+  {
+    Stmt previous(db_, "SELECT event_hash FROM audit WHERE event_hash<>'' ORDER BY id DESC LIMIT 1");
+    if (previous.ok() && previous.Step()) previous_hash = previous.Text(0);
+  }
+  const std::string ts = NowIso();
+  const std::string event_hash = AuditHash(previous_hash, ts, actor_id, action, object_type,
+                                           object_id, result, correlation_id, detail);
   Stmt q(db_, "INSERT INTO audit(ts,actor_id,action,object_type,object_id,result,correlation_id,"
-              "detail) VALUES(?,?,?,?,?,?,?,?)");
+              "detail,previous_hash,event_hash) VALUES(?,?,?,?,?,?,?,?,?,?)");
   if (!q.ok()) return;
-  q.Bind(1, NowIso()); q.Bind(2, actor_id); q.Bind(3, action); q.Bind(4, object_type);
+  q.Bind(1, ts); q.Bind(2, actor_id); q.Bind(3, action); q.Bind(4, object_type);
   q.Bind(5, object_id); q.Bind(6, result); q.Bind(7, correlation_id); q.Bind(8, detail);
+  q.Bind(9, previous_hash); q.Bind(10, event_hash);
   q.Done();
 }
 
@@ -770,7 +807,7 @@ std::vector<AuditEvent> Store::ListAudit(int limit, const std::string& object_ty
   TA_STORE_LOCK();
   std::vector<AuditEvent> out;
   std::string sql = "SELECT a.id,a.ts,a.actor_id,COALESCE(u.username,''),a.action,a.object_type,"
-                    "a.object_id,a.result,a.correlation_id,a.detail FROM audit a "
+                    "a.object_id,a.result,a.correlation_id,a.detail,a.previous_hash,a.event_hash FROM audit a "
                     "LEFT JOIN users u ON u.id=a.actor_id";
   if (!object_type.empty()) sql += " WHERE a.object_type=? AND a.object_id=?";
   sql += " ORDER BY a.id DESC LIMIT ?";
@@ -784,9 +821,30 @@ std::vector<AuditEvent> Store::ListAudit(int limit, const std::string& object_ty
     e.id = q.Int64(0); e.ts = q.Text(1); e.actor_id = q.Int64(2); e.actor_name = q.Text(3);
     e.action = q.Text(4); e.object_type = q.Text(5); e.object_id = q.Text(6);
     e.result = q.Text(7); e.correlation_id = q.Text(8); e.detail = q.Text(9);
+    e.previous_hash = q.Text(10); e.event_hash = q.Text(11);
     out.push_back(e);
   }
   return out;
+}
+
+bool Store::VerifyAuditChain(std::string* err) {
+  TA_STORE_LOCK();
+  Stmt q(db_, "SELECT id,ts,actor_id,action,object_type,object_id,result,correlation_id,detail,"
+              "previous_hash,event_hash FROM audit WHERE event_hash<>'' ORDER BY id");
+  if (!q.ok()) { if (err) *err = "cannot read the audit chain"; return false; }
+  std::string expected_previous;
+  while (q.Step()) {
+    const std::string previous = q.Text(9);
+    const std::string stored = q.Text(10);
+    if (previous != expected_previous ||
+        stored != AuditHash(previous, q.Text(1), q.Int64(2), q.Text(3), q.Text(4), q.Text(5),
+                            q.Text(6), q.Text(7), q.Text(8))) {
+      if (err) *err = "audit chain mismatch at event " + std::to_string(q.Int64(0));
+      return false;
+    }
+    expected_previous = stored;
+  }
+  return true;
 }
 
 
@@ -797,7 +855,7 @@ std::vector<AuditEvent> Store::ListProjectAudit(long long project_id, int limit)
   // subqueries cast rather than relying on SQLite's type affinity.
   static const char* kSql =
       "SELECT a.id,a.ts,a.actor_id,COALESCE(u.username,''),a.action,a.object_type,"
-      "a.object_id,a.result,a.correlation_id,a.detail FROM audit a "
+      "a.object_id,a.result,a.correlation_id,a.detail,a.previous_hash,a.event_hash FROM audit a "
       "LEFT JOIN users u ON u.id=a.actor_id "
       "WHERE (a.object_type='project' AND a.object_id=CAST(?1 AS TEXT)) "
       "   OR (a.object_type='instance' AND a.object_id IN "
@@ -814,6 +872,7 @@ std::vector<AuditEvent> Store::ListProjectAudit(long long project_id, int limit)
     e.id = q.Int64(0); e.ts = q.Text(1); e.actor_id = q.Int64(2); e.actor_name = q.Text(3);
     e.action = q.Text(4); e.object_type = q.Text(5); e.object_id = q.Text(6);
     e.result = q.Text(7); e.correlation_id = q.Text(8); e.detail = q.Text(9);
+    e.previous_hash = q.Text(10); e.event_hash = q.Text(11);
     out.push_back(e);
   }
   return out;
