@@ -29,7 +29,7 @@ WORKDIR /opt/chocobofix
 COPY --from=build /src/build/trackaccess /src/build/trackaccess-service ./build/
 # The solver is dynamically linked to the OR-Tools bundle. Give that bundle a
 # stable runtime path instead of retaining CMake's build-stage /src path.
-COPY --from=build /src/third_party/or-tools_*/lib/ /opt/ortools/lib/
+COPY --from=build /src/third_party/or-tools_x86_64_Ubuntu-24.04_cpp_v9.14.6206/lib/ /opt/ortools/lib/
 ENV LD_LIBRARY_PATH=/opt/ortools/lib
 COPY --from=client /web-dist ./web
 COPY --from=build /src/data/upstream/PS1/01_data ./data/public

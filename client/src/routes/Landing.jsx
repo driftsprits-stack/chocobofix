@@ -15,9 +15,6 @@ export default function Landing() {
     <main id="main" className="lede page">
       <header className="masthead reveal" style={{ '--d': '0ms' }}>
         <Link className="brand" to="/">chocobofix</Link>
-        <nav>
-          <Link to="/terms" className="label">terms</Link>
-        </nav>
       </header>
 
       <div className="lede-body">
