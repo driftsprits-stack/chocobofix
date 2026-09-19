@@ -12,6 +12,10 @@ permissions:
   contents: read
   security-events: write
 
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   analyze:
     name: codeql-${{ matrix.language }}
@@ -23,7 +27,7 @@ jobs:
         language: [javascript-typescript, c-cpp]
     steps:
       - uses: actions/checkout@v4
-      - uses: github/codeql-action/init@v3
+      - uses: github/codeql-action/init@v4
         with:
           languages: ${{ matrix.language }}
       - name: Install native prerequisites
@@ -42,4 +46,4 @@ jobs:
         run: |
           npm ci --prefix client --no-audit --no-fund
           npm run build --prefix client
-      - uses: github/codeql-action/analyze@v3
+      - uses: github/codeql-action/analyze@v4
