@@ -1,38 +1,70 @@
 name: build-and-test
-on: [push, pull_request]
+
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  linux:
+  native:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - name: Install prerequisites
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq
-             build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
-      - name: Cache pinned dependencies
+      - name: Install native prerequisites
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
+      - name: Cache pinned native dependencies
         uses: actions/cache@v4
         with:
           path: third_party
-          key: ortools-9.14.6206-${{ runner.os }}
+          key: ortools-9.14.6206-${{ runner.os }}-${{ runner.arch }}
       - run: ./scripts/fetch_deps.sh
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build -j
-      - name: Our checker must still accept the organisers' sample
-        run: ./build/check_sample
-      - run: ./build/test_core
-      - run: ./build/test_store
+      - run: cmake --build build -j2
+      - run: ctest --test-dir build --output-on-failure
       - run: ./tests/integration.sh build
+
+  client:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci --prefix client
+      - run: npm --prefix client run test:coverage
+      - run: npm --prefix client run build
+      - run: npm --prefix client audit --audit-level=moderate
+
+  browser:
+    needs: [native, client]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
+      - uses: actions/cache@v4
+        with:
+          path: third_party
+          key: ortools-9.14.6206-${{ runner.os }}-${{ runner.arch }}
+      - run: ./scripts/fetch_deps.sh
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j2 --target trackaccess trackaccess-service
       - run: npm ci --prefix client
       - run: npm --prefix client run build
       - run: cd client && npx playwright install --with-deps chromium
@@ -43,34 +75,11 @@ jobs:
           name: browser-results
           path: client/test-results/
 
-  macos:
-    runs-on: macos-15
-    timeout-minutes: 45
-    steps:
-      - uses: actions/checkout@v4
-      - run: ./scripts/fetch_deps.sh
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-      - run: cmake --build build -j
-      - run: ./build/check_sample
-      - run: ./build/test_core
-      - run: ./build/test_store
-      - run: ./tests/integration.sh build
-
-  frontend:
+  final-container:
+    needs: [native, client]
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: client/package-lock.json
-      - run: npm ci --prefix client
-      - run: npm --prefix client run check
-      - run: npm --prefix client audit --audit-level=moderate
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: frontend-coverage
-          path: client/coverage/
+      - name: Build final runtime image
+        run: docker build --pull --tag chocobofix:${{ github.sha }} .

@@ -11,11 +11,15 @@
 #include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <signal.h>
 
 #include <atomic>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +27,7 @@
 #include <mutex>
 #include <random>
 #include <sstream>
+#include <system_error>
 #include <thread>
 #include <unordered_map>
 
@@ -162,6 +167,129 @@ struct Job {
   std::atomic<bool> cancel{false};
 };
 
+// A worker exit code alone is not enough to diagnose a failed launch. The
+// dynamic loader also uses 127, and the CLI may return other documented codes.
+// Keep the launch failure reported by the child separate from its eventual
+// process status.
+struct ProcessResult {
+  bool forked = false;
+  int parent_errno = 0;
+  int child_stage = 0;
+  int child_errno = 0;
+  int exit_code = -1;
+  int term_signal = 0;
+};
+
+enum ChildStage : int {
+  kChildDupStdout = 1,
+  kChildDupStderr = 2,
+  kChildMemoryLimit = 3,
+  kChildCpuLimit = 4,
+  kChildFileLimit = 5,
+  kChildExec = 6,
+};
+
+struct ChildFailure {
+  int stage;
+  int error;
+};
+
+const char* ChildStageName(int stage) {
+  switch (stage) {
+    case kChildDupStdout: return "redirect stdout";
+    case kChildDupStderr: return "redirect stderr";
+    case kChildMemoryLimit: return "set memory limit";
+    case kChildCpuLimit: return "set CPU limit";
+    case kChildFileLimit: return "set file limit";
+    case kChildExec: return "execute solver";
+    default: return "prepare solver process";
+  }
+}
+
+// Only async-signal-safe operations are used after fork. This matters because
+// the service is multithreaded: iostreams, allocation and strerror are not safe
+// in the child between fork and exec.
+[[noreturn]] void ChildExitWithError(int fd, int stage) {
+  const ChildFailure failure{stage, errno};
+  const char* bytes = reinterpret_cast<const char*>(&failure);
+  size_t left = sizeof failure;
+  while (left > 0) {
+    const ssize_t n = ::write(fd, bytes, left);
+    if (n > 0) { bytes += n; left -= static_cast<size_t>(n); continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  ::_exit(127);
+}
+
+bool MakePipe(int fd[2], bool close_write_on_exec, int* error) {
+  if (::pipe(fd) != 0) { *error = errno; return false; }
+  if (close_write_on_exec) {
+    const int flags = ::fcntl(fd[1], F_GETFD);
+    if (flags < 0 || ::fcntl(fd[1], F_SETFD, flags | FD_CLOEXEC) < 0) {
+      *error = errno;
+      ::close(fd[0]);
+      ::close(fd[1]);
+      return false;
+    }
+  }
+  return true;
+}
+
+void ReadChildFailure(int fd, ProcessResult* result) {
+  ChildFailure failure{};
+  char* bytes = reinterpret_cast<char*>(&failure);
+  size_t have = 0;
+  while (have < sizeof failure) {
+    const ssize_t n = ::read(fd, bytes + have, sizeof failure - have);
+    if (n > 0) { have += static_cast<size_t>(n); continue; }
+    if (n < 0 && errno == EINTR) continue;
+    break;
+  }
+  ::close(fd);
+  if (have == sizeof failure) {
+    result->child_stage = failure.stage;
+    result->child_errno = failure.error;
+  }
+}
+
+void WaitForChild(pid_t pid, ProcessResult* result) {
+  int status = 0;
+  pid_t waited;
+  do { waited = ::waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+  if (waited < 0) { result->parent_errno = errno; return; }
+  if (WIFEXITED(status)) result->exit_code = WEXITSTATUS(status);
+  else if (WIFSIGNALED(status)) result->term_signal = WTERMSIG(status);
+}
+
+std::string OsError(int error) {
+  return std::error_code(error, std::generic_category()).message();
+}
+
+bool LooksLikeLoaderFailure(const std::string& output) {
+  return output.find("error while loading shared libraries") != std::string::npos ||
+         output.find("Library not loaded") != std::string::npos ||
+         output.find("cannot open shared object file") != std::string::npos;
+}
+
+std::string WorkerFailureMessage(const ProcessResult& p, const std::string& output) {
+  if (!p.forked)
+    return "the solver process could not be created: " + OsError(p.parent_errno);
+  if (p.child_errno != 0)
+    return std::string("the solver could not start: ") + ChildStageName(p.child_stage) +
+           " failed: " + OsError(p.child_errno);
+  if (p.parent_errno != 0)
+    return "the service could not collect the solver result: " + OsError(p.parent_errno);
+  if (p.term_signal != 0)
+    return "the solver process ended after signal " + std::to_string(p.term_signal) +
+           "; the service is still running";
+  if (p.exit_code == 127 && LooksLikeLoaderFailure(output))
+    return "the solver started, but a required runtime library could not be loaded; see the job log";
+  if (p.exit_code >= 0)
+    return "the solver exited with status " + std::to_string(p.exit_code) + "; see the job log";
+  return "the solver ended without a process status; see the service log";
+}
+
 std::mutex g_mu;
 std::condition_variable g_cv;
 std::unordered_map<std::string, std::shared_ptr<Job>> g_jobs;
@@ -191,16 +319,36 @@ std::string JobJson(const Job& j) {
   return os.str();
 }
 
-// Runs one solve as a child process. Returns the exit status, or -1 on spawn
-// failure. Output is streamed back so the UI can show live progress.
-int RunWorker(const std::shared_ptr<Job>& job) {
+void AppendJobOutput(const std::shared_ptr<Job>& job, const std::string& text) {
+  constexpr size_t kMaxJobLog = 1u << 20;
+  std::lock_guard<std::mutex> lk(g_mu);
+  job->log += text;
+  if (job->log.size() > kMaxJobLog) {
+    job->log.erase(0, job->log.size() - kMaxJobLog);
+    if (job->log.rfind("[earlier worker output removed]\n", 0) != 0)
+      job->log.insert(0, "[earlier worker output removed]\n");
+  }
+}
+
+// Runs one solve as a child process. Output is streamed back so the UI can show
+// live progress. A close-on-exec status pipe carries the actual OS error if the
+// child cannot prepare or execute the solver.
+ProcessResult RunWorker(const std::shared_ptr<Job>& job) {
+  ProcessResult result;
   const std::string in = job->instance_dir;
   const std::string out = JobDir(job->id);
   std::error_code ec;
   fs::create_directories(out, ec);
+  if (ec) { result.parent_errno = ec.value(); return result; }
 
-  int pipefd[2];
-  if (::pipe(pipefd) != 0) return -1;
+  int output_pipe[2];
+  if (!MakePipe(output_pipe, false, &result.parent_errno)) return result;
+  int error_pipe[2];
+  if (!MakePipe(error_pipe, true, &result.parent_errno)) {
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    return result;
+  }
 
   const std::string secs = std::to_string(job->seconds);
   const std::string workers = "4";
@@ -212,70 +360,75 @@ int RunWorker(const std::shared_ptr<Job>& job) {
   std::vector<char*> argv;
   for (auto& s : argv_s) argv.push_back(const_cast<char*>(s.c_str()));
   argv.push_back(nullptr);
+  const int memory_mb = g_cfg.worker_memory_mb;
+  const double seconds = job->seconds;
+  const char* executable = g_cfg.worker.c_str();
 
   const pid_t pid = ::fork();
-  if (pid < 0) { ::close(pipefd[0]); ::close(pipefd[1]); return -1; }
+  if (pid < 0) {
+    result.parent_errno = errno;
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::close(error_pipe[0]);
+    ::close(error_pipe[1]);
+    return result;
+  }
   if (pid == 0) {
     // Child. Bound what a solve may consume so a pathological instance cannot
     // take the host down with it.
-    ::close(pipefd[0]);
-    ::dup2(pipefd[1], STDOUT_FILENO);
-    ::dup2(pipefd[1], STDERR_FILENO);
-    ::close(pipefd[1]);
+    ::close(output_pipe[0]);
+    ::close(error_pipe[0]);
+    if (::dup2(output_pipe[1], STDOUT_FILENO) < 0)
+      ChildExitWithError(error_pipe[1], kChildDupStdout);
+    if (::dup2(output_pipe[1], STDERR_FILENO) < 0)
+      ChildExitWithError(error_pipe[1], kChildDupStderr);
+    ::close(output_pipe[1]);
     rlimit rl{};
-    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(g_cfg.worker_memory_mb) * 1024 * 1024;
-    ::setrlimit(RLIMIT_AS, &rl);
-    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(job->seconds * 4 + 60);
-    ::setrlimit(RLIMIT_CPU, &rl);
+    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(memory_mb) * 1024 * 1024;
+    if (::setrlimit(RLIMIT_AS, &rl) != 0)
+      ChildExitWithError(error_pipe[1], kChildMemoryLimit);
+    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(seconds * 4 + 60);
+    if (::setrlimit(RLIMIT_CPU, &rl) != 0)
+      ChildExitWithError(error_pipe[1], kChildCpuLimit);
     rl.rlim_cur = rl.rlim_max = 256u * 1024 * 1024;      // no runaway output files
-    ::setrlimit(RLIMIT_FSIZE, &rl);
-    ::execv(g_cfg.worker.c_str(), argv.data());
-    // This runs only after execv fails. stderr is already connected to the job
-    // log, so preserve the operating-system reason instead of returning a
-    // context-free exit code.
-    int exec_errno = errno;
-    const char prefix[] = "worker exec failed with errno ";
-    ::write(STDERR_FILENO, prefix, sizeof(prefix) - 1);
-    char digits[16];
-    size_t count = 0;
-    do {
-      digits[count++] = static_cast<char>('0' + exec_errno % 10);
-      exec_errno /= 10;
-    } while (exec_errno > 0 && count < sizeof(digits));
-    for (size_t i = 0; i < count / 2; ++i)
-      std::swap(digits[i], digits[count - i - 1]);
-    ::write(STDERR_FILENO, digits, count);
-    const char newline = '\n';
-    ::write(STDERR_FILENO, &newline, 1);
-    ::_exit(127);
+    if (::setrlimit(RLIMIT_FSIZE, &rl) != 0)
+      ChildExitWithError(error_pipe[1], kChildFileLimit);
+    ::execv(executable, argv.data());
+    ChildExitWithError(error_pipe[1], kChildExec);
   }
-  ::close(pipefd[1]);
+  result.forked = true;
+  ::close(output_pipe[1]);
+  ::close(error_pipe[1]);
+  ReadChildFailure(error_pipe[0], &result);
   { std::lock_guard<std::mutex> lk(g_mu); job->pid = pid; }
 
   std::string buf;
   char chunk[4096];
-  ssize_t n;
-  while ((n = ::read(pipefd[0], chunk, sizeof chunk)) > 0) {
+  for (;;) {
+    const ssize_t n = ::read(output_pipe[0], chunk, sizeof chunk);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
     buf.append(chunk, static_cast<size_t>(n));
     size_t nl;
     while ((nl = buf.find('\n')) != std::string::npos) {
       std::string line = buf.substr(0, nl);
       buf.erase(0, nl + 1);
-      std::lock_guard<std::mutex> lk(g_mu);
-      job->log += line + "\n";
-      if (line.find("objective") != std::string::npos || line.find("status:") != std::string::npos ||
-          line.find("===") != std::string::npos)
-        job->progress.push_back(line);
-      if (job->progress.size() > 400) job->progress.erase(job->progress.begin());
+      AppendJobOutput(job, line + "\n");
+      {
+        std::lock_guard<std::mutex> lk(g_mu);
+        if (line.find("objective") != std::string::npos || line.find("status:") != std::string::npos ||
+            line.find("===") != std::string::npos)
+          job->progress.push_back(line);
+        if (job->progress.size() > 400) job->progress.erase(job->progress.begin());
+      }
     }
     if (job->cancel.load()) { ::kill(pid, SIGTERM); }
   }
-  ::close(pipefd[0]);
-  int status = 0;
-  ::waitpid(pid, &status, 0);
+  if (!buf.empty()) AppendJobOutput(job, buf);  // loader errors often have no final newline
+  ::close(output_pipe[0]);
+  WaitForChild(pid, &result);
   { std::lock_guard<std::mutex> lk(g_mu); job->pid = 0; }
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
-  return -2;   // killed by a signal: crash or cancellation
+  return result;
 }
 
 // Runs the worker synchronously for the short, interactive analyses (explain /
@@ -305,38 +458,77 @@ class WorkerSlot {
 };
 
 int RunWorkerSync(const std::vector<std::string>& argv_s, double seconds, std::string* output) {
-  int pipefd[2];
-  if (::pipe(pipefd) != 0) return -1;
+  ProcessResult result;
+  int output_pipe[2];
+  if (!MakePipe(output_pipe, false, &result.parent_errno)) {
+    output->append("worker setup failed: " + OsError(result.parent_errno));
+    return -1;
+  }
+  int error_pipe[2];
+  if (!MakePipe(error_pipe, true, &result.parent_errno)) {
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    output->append("worker setup failed: " + OsError(result.parent_errno));
+    return -1;
+  }
   std::vector<char*> argv;
   for (auto& a : argv_s) argv.push_back(const_cast<char*>(a.c_str()));
   argv.push_back(nullptr);
+  const int memory_mb = g_cfg.worker_memory_mb;
+  const char* executable = argv_s.front().c_str();
 
   const pid_t pid = ::fork();
-  if (pid < 0) { ::close(pipefd[0]); ::close(pipefd[1]); return -1; }
+  if (pid < 0) {
+    result.parent_errno = errno;
+    ::close(output_pipe[0]);
+    ::close(output_pipe[1]);
+    ::close(error_pipe[0]);
+    ::close(error_pipe[1]);
+    output->append("worker setup failed: " + OsError(result.parent_errno));
+    return -1;
+  }
   if (pid == 0) {
-    ::close(pipefd[0]);
-    ::dup2(pipefd[1], STDOUT_FILENO);
-    ::dup2(pipefd[1], STDERR_FILENO);
-    ::close(pipefd[1]);
+    ::close(output_pipe[0]);
+    ::close(error_pipe[0]);
+    if (::dup2(output_pipe[1], STDOUT_FILENO) < 0)
+      ChildExitWithError(error_pipe[1], kChildDupStdout);
+    if (::dup2(output_pipe[1], STDERR_FILENO) < 0)
+      ChildExitWithError(error_pipe[1], kChildDupStderr);
+    ::close(output_pipe[1]);
     rlimit rl{};
-    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(g_cfg.worker_memory_mb) * 1024 * 1024;
-    ::setrlimit(RLIMIT_AS, &rl);
+    rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(memory_mb) * 1024 * 1024;
+    if (::setrlimit(RLIMIT_AS, &rl) != 0)
+      ChildExitWithError(error_pipe[1], kChildMemoryLimit);
     rl.rlim_cur = rl.rlim_max = static_cast<rlim_t>(seconds * 8 + 60);
-    ::setrlimit(RLIMIT_CPU, &rl);
-    ::execv(g_cfg.worker.c_str(), argv.data());
-    ::_exit(127);
+    if (::setrlimit(RLIMIT_CPU, &rl) != 0)
+      ChildExitWithError(error_pipe[1], kChildCpuLimit);
+    ::execv(executable, argv.data());
+    ChildExitWithError(error_pipe[1], kChildExec);
   }
-  ::close(pipefd[1]);
+  result.forked = true;
+  ::close(output_pipe[1]);
+  ::close(error_pipe[1]);
+  ReadChildFailure(error_pipe[0], &result);
   char buf[4096];
-  ssize_t n;
-  while ((n = ::read(pipefd[0], buf, sizeof buf)) > 0) {
-    output->append(buf, static_cast<size_t>(n));
-    if (output->size() > 1u << 20) break;    // bound the reply
+  for (;;) {
+    const ssize_t n = ::read(output_pipe[0], buf, sizeof buf);
+    if (n < 0 && errno == EINTR) continue;
+    if (n <= 0) break;
+    const size_t room = (1u << 20) - std::min(output->size(), size_t{1u << 20});
+    output->append(buf, std::min(static_cast<size_t>(n), room));
   }
-  ::close(pipefd[0]);
-  int status = 0;
-  ::waitpid(pid, &status, 0);
-  return WIFEXITED(status) ? WEXITSTATUS(status) : -2;
+  ::close(output_pipe[0]);
+  WaitForChild(pid, &result);
+  if (result.child_errno != 0) {
+    output->append("\nworker launch failure: " + std::string(ChildStageName(result.child_stage)) +
+                   " failed: " + OsError(result.child_errno));
+    return -1;
+  }
+  if (result.parent_errno != 0) {
+    output->append("\nworker status failure: " + OsError(result.parent_errno));
+    return -1;
+  }
+  return result.term_signal != 0 ? -2 : result.exit_code;
 }
 
 // Turns a finished job's output directories into immutable plan versions.
@@ -404,6 +596,7 @@ void RecordPlanVersions(const std::shared_ptr<Job>& job) {
 void WorkerLoop() {
   for (;;) {
     std::string id;
+    std::shared_ptr<Job> job;
     {
       std::unique_lock<std::mutex> lk(g_mu);
       g_cv.wait(lk, [] { return g_shutdown || (!g_queue.empty() && g_running < g_cfg.max_concurrent_solves); });
@@ -411,13 +604,13 @@ void WorkerLoop() {
       id = g_queue.front();
       g_queue.pop_front();
       ++g_running;
+      auto it = g_jobs.find(id);
+      if (it != g_jobs.end()) job = it->second;
     }
-    auto it = g_jobs.find(id);
-    if (it == g_jobs.end()) { std::lock_guard<std::mutex> lk(g_mu); --g_running; continue; }
-    auto job = it->second;
+    if (!job) { std::lock_guard<std::mutex> lk(g_mu); --g_running; continue; }
     { std::lock_guard<std::mutex> lk(g_mu); job->state = "running"; job->started_at = NowIso(); }
 
-    const int rc = RunWorker(job);
+    const ProcessResult process = RunWorker(job);
 
     // Persist whatever the worker produced as immutable plan versions, before
     // the job is reported finished, so a version always exists by the time the
@@ -428,16 +621,25 @@ void WorkerLoop() {
       std::lock_guard<std::mutex> lk(g_mu);
       job->finished_at = NowIso();
       if (job->cancel.load()) { job->state = "cancelled"; job->error = "stopped by operator"; }
-      else if (rc == 0) job->state = "done";
-      else if (rc == 2) { job->state = "failed"; job->error = "no complete plan was found within the budget; this is not a proof that none exists"; }
-      else if (rc == 3) { job->state = "failed"; job->error = "the produced plan did not pass the independent check"; }
-      else if (rc == 1) { job->state = "failed"; job->error = "the instance was rejected; see the log"; }
-      else if (rc == -2) { job->state = "failed"; job->error = "the solver process terminated abnormally; the service is unaffected"; }
-      else if (rc == 127) {
+      else if (process.child_errno == 0 && process.parent_errno == 0 &&
+               process.term_signal == 0 && process.exit_code == 0) job->state = "done";
+      else if (process.child_errno == 0 && process.exit_code == 2) {
         job->state = "failed";
-        job->error = "solver startup failed; check the worker log and runtime libraries";
+        job->error = "no complete plan was found within the budget; this is not a proof that none exists";
+      } else if (process.child_errno == 0 && process.exit_code == 3) {
+        job->state = "failed";
+        job->error = "the produced plan did not pass the independent check";
+      } else if (process.child_errno == 0 && process.exit_code == 1) {
+        job->state = "failed";
+        job->error = "the instance was rejected; see the job log";
+      } else {
+        job->state = "failed";
+        job->error = WorkerFailureMessage(process, job->log);
       }
-      else { job->state = "failed"; job->error = "worker process failed with exit code " + std::to_string(rc) + "; see the log"; }
+      if (job->state == "failed") {
+        std::cerr << "worker job=" << job->id << " correlation=" << job->correlation_id
+                  << " failed: " << job->error << "\n";
+      }
       --g_running;
     }
     g_cv.notify_all();
@@ -671,7 +873,9 @@ int main(int argc, char** argv) {
 
   // Optional first-run account, so a fresh deployment is usable without a
   // separate admin tool. Ignored once any account exists.
-  const std::string boot = arg("--bootstrap-admin", "");
+  const char* boot_env = std::getenv("CHOCOBOFIX_BOOTSTRAP_ADMIN");
+  std::string boot = arg("--bootstrap-admin", boot_env ? boot_env : "");
+  if (boot_env) ::unsetenv("CHOCOBOFIX_BOOTSTRAP_ADMIN");
   if (!boot.empty()) {
     const auto colon = boot.find(':');
     if (colon == std::string::npos) {
@@ -691,6 +895,13 @@ int main(int argc, char** argv) {
       std::cout << "accounts already exist; --bootstrap-admin ignored\n";
     }
   }
+  std::fill(boot.begin(), boot.end(), '\0');
+  const bool loopback_only = g_cfg.host == "127.0.0.1" || g_cfg.host == "::1" ||
+                             g_cfg.host == "localhost";
+  if (!loopback_only && g_store.UserCount() == 0) {
+    std::cerr << "no administrator exists; set CHOCOBOFIX_BOOTSTRAP_ADMIN from a protected "
+                 "deployment secret before the public service starts\n";
+  }
 
   httplib::Server srv;
   srv.set_payload_max_length(g_cfg.max_upload_bytes);
@@ -707,9 +918,6 @@ int main(int argc, char** argv) {
     res.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.set_header("X-Content-Type-Options", "nosniff");
     res.set_header("X-Frame-Options", "DENY");
-    res.set_header("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-    res.set_header("Cross-Origin-Opener-Policy", "same-origin");
-    res.set_header("Cross-Origin-Resource-Policy", "same-origin");
     res.set_header("Referrer-Policy", "no-referrer");
     res.set_header("Content-Security-Policy",
                    "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
@@ -776,6 +984,10 @@ int main(int argc, char** argv) {
   srv.Post("/api/v1/bootstrap", [](const httplib::Request& req, httplib::Response& res) {
     static std::mutex bootstrap_mutex;
     std::lock_guard<std::mutex> bootstrap_lock(bootstrap_mutex);
+    const bool loopback_only = g_cfg.host == "127.0.0.1" || g_cfg.host == "::1" ||
+                               g_cfg.host == "localhost";
+    if (!loopback_only)
+      return Deny(res, 403, "the deployment operator must create the initial administrator");
     if (g_store.UserCount() != 0) return Deny(res, 409, "this deployment is already set up");
     const std::string user = req.get_param_value("username");
     const std::string pass = req.get_param_value("password");
@@ -1321,9 +1533,7 @@ int main(int argc, char** argv) {
          << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
          << "," << Q("result") << ":" << Q(e.result)
          << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
-         << "," << Q("detail") << ":" << Q(e.detail)
-         << "," << Q("previous_hash") << ":" << Q(e.previous_hash)
-         << "," << Q("event_hash") << ":" << Q(e.event_hash) << "}";
+         << "," << Q("detail") << ":" << Q(e.detail) << "}";
       first = false;
     }
     os << "]}";
@@ -1349,9 +1559,7 @@ int main(int argc, char** argv) {
          << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
          << "," << Q("result") << ":" << Q(e.result)
          << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
-         << "," << Q("detail") << ":" << Q(e.detail)
-         << "," << Q("previous_hash") << ":" << Q(e.previous_hash)
-         << "," << Q("event_hash") << ":" << Q(e.event_hash) << "}";
+         << "," << Q("detail") << ":" << Q(e.detail) << "}";
       first = false;
     }
     os << "]}";

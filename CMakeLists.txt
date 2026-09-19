@@ -58,6 +58,15 @@ target_link_libraries(ta_solver PUBLIC ta_core ortools::ortools)
 
 add_executable(trackaccess src/cli/main.cpp)
 target_link_libraries(trackaccess PRIVATE ta_solver)
+if(UNIX AND NOT APPLE)
+  # The Cloud Run image relocates the executable from /src/build to
+  # /opt/chocobofix/build and copies the vendored DSOs beside it in ../lib.
+  # Keep the build-tree path for tests and add an origin-relative production
+  # path so the final image does not depend on the build directory existing.
+  set_target_properties(trackaccess PROPERTIES
+    BUILD_RPATH "${ORTOOLS_ROOT}/lib;$ORIGIN/../lib"
+    INSTALL_RPATH "$ORIGIN/../lib")
+endif()
 
 # --- shared-project persistence -------------------------------------------
 # SQLite is the system library on both macOS and mainstream Linux. Password
@@ -66,7 +75,14 @@ target_link_libraries(trackaccess PRIVATE ta_solver)
 find_package(SQLite3 REQUIRED)
 add_library(ta_store STATIC src/service/store.cpp src/service/crypto.cpp)
 target_include_directories(ta_store PUBLIC src)
-target_link_libraries(ta_store PUBLIC ta_core SQLite::SQLite3)
+if(TARGET SQLite::SQLite3)
+  set(TA_SQLITE_TARGET SQLite::SQLite3)
+elseif(TARGET SQLite3::SQLite3)
+  set(TA_SQLITE_TARGET SQLite3::SQLite3)
+else()
+  message(FATAL_ERROR "FindSQLite3 succeeded but did not provide a supported imported target")
+endif()
+target_link_libraries(ta_store PUBLIC ta_core ${TA_SQLITE_TARGET})
 if(APPLE)
   message(STATUS "Password hashing: CommonCrypto PBKDF2-HMAC-SHA256")
 else()
