@@ -1,378 +1,342 @@
-# TrackAccess — PS1 Railway Track Access Optimisation
+# ChocoboFix
 
-A decision-support tool for railway possession planning on the dual-line
-Alpha/Beta network: it imports the eight instance CSVs, generates a possession
-schedule for Scenarios A, B and C with CP-SAT, checks the result against the
-operating rules with an independently written checker, and exports the three
-competition files per scenario.
+**Rail maintenance plans that people can inspect before they approve.**
 
-**Central principle: a planner should be able to see the consequences of a
-decision before committing to it.** Every figure in the interface is computed by
-re-reading the files that were actually written, not from a parallel copy held
-in memory.
+ChocoboFix is our solution to NebulaX Hackathon Problem Statement 1. It converts
+eight railway-planning CSV files into feasible maintenance schedules for three
+operating policies. The application then explains the result, shows it on a
+shared timeline, checks every exported file, and records who generated or
+approved each version.
 
----
+This repository contains the complete product:
 
-## Status at a glance
+- a C++20 scheduling engine built with Google OR-Tools CP-SAT;
+- an independent schedule checker;
+- a native HTTP service with SQLite storage;
+- a React interface for planners, approvers, administrators, and viewers;
+- command-line tools for validation and submission export;
+- automated native, integration, frontend, and browser tests.
 
-| | |
-| --- | --- |
-| Public-instance result | Scenarios A, B, C all **proven optimal**, 0 hard violations under our checker |
-| Solve time (all three) | **0.48 s** wall, 54 activities / 14 contracts / 76 locations / 30 weeks |
-| Corroboration | our checker accepts the upstream `03_submission_sample/` as feasible (0 violations) |
-| Tests | 120 core + 102 store + 181 integration/security + 48 frontend, ASan+UBSan clean |
-| Multi-user | accounts, roles, sessions, plan versions, validation-bound approvals, audit — all through the interface |
-| Hosted deployment | [Cloud Run](https://chocobofix-53566346633.asia-southeast1.run.app/) — see [Deployment](#deployment) |
-| Video | **not recorded** — script in `docs/DEMO_SCRIPT.md` |
+> ChocoboFix supports planning decisions. A plan marked **validated** has passed
+> this repository's checker. It is not an official railway operating approval.
 
-Objective scores on the public instance (lower is better; every term is a penalty):
+## The PS1 problem, in plain language
 
-| Scenario | Overrun days | Extra access-nights | ECLO nights | Objective | Optimality |
-| --- | --- | --- | --- | --- | --- |
-| A | 28 | 0 | 0 | **32.2** | proven |
-| B | 0 | 0 | 6 | **30.0** | proven |
-| C | 14 | 0 | 2 | **26.1** | proven |
+Rail maintenance teams cannot close any track whenever they want. An activity
+may depend on earlier work, require several locations at once, consume limited
+weekly access, block a nearby workfront, or need a safety buffer around its
+closure zone.
 
-For reference, the upstream sample submission (Scenario A) scores **48.3** by the
-same measure, under the same checker. Optimality is proven *with respect to our
-model of the rules* — see `docs/DERIVED_RULES.md` for where that model is
-corroborated and where it is a conservative reading.
+PS1 supplies eight CSV files describing:
 
----
+- lines, stations, sectors, and railway locations;
+- the access available at each location and week;
+- locations that must be buffered together;
+- project contracts and planned completion dates;
+- maintenance activities, durations, priorities, predecessors, and workfronts;
+- the parameters used to score a completed schedule.
 
-## Clean-machine setup
+ChocoboFix assigns every activity to one or more weeks while enforcing the
+physical and sequencing rules. It then writes the three files required by the
+PS1 validator:
 
-Verified on a clean checkout on arm64 macOS 15.6.1. Each step is a command you
-can paste; nothing else is required.
-
-### 1. Prerequisites
-
-| Need | macOS | Debian / Ubuntu |
-| --- | --- | --- |
-| C++20 compiler | Xcode Command Line Tools (`xcode-select --install`) | `build-essential` (GCC 12+) |
-| CMake ≥ 3.20 | `brew install cmake` | `cmake` |
-| SQLite headers | in the macOS SDK, nothing to install | `libsqlite3-dev` |
-| Password hashing | CommonCrypto, in the SDK | `libssl-dev` (OpenSSL) |
-| `curl`, `tar`, Python 3.9+ | preinstalled | `curl ca-certificates python3` |
-
-```bash
-# Debian / Ubuntu, one line
-sudo apt-get install -y build-essential cmake curl ca-certificates                         libsqlite3-dev libssl-dev python3
+```text
+SCHEDULE_ACCESS.csv
+SCHEDULE_OCCUPANCY.csv
+RESULTS.csv
 ```
 
-Python is used only by the cross-check and test tools, never by the application
-at runtime. **No other system packages are needed.** OR-Tools is fetched as a
-pinned binary into `third_party/` — not installed system-wide, no sudo, no
-Homebrew formula.
+## Three policies, three questions
 
-### 2. Fetch dependencies and build
+Every project produces all three PS1 policies. Their objectives differ, so
+their scores should not be compared as though they were one competition.
+
+| Policy | Question answered | What it prioritises |
+| --- | --- | --- |
+| **A · Fixed access** | What can we complete with the normal access supply? | No extra access and no ECLO; completion may move later. |
+| **B · Fixed deadlines** | What access is required to meet the planned dates? | Deadlines remain fixed; extra access or ECLO may be required. |
+| **C · Balanced** | What is the best compromise? | Trades limited additional access against delay. |
+
+Safety, topology, location occupancy, precedence, buffer, closure-zone, and
+workfront rules remain constraints in every policy.
+
+## How the application works
+
+1. **Create a project.** Give the planning exercise a name and owner.
+2. **Upload the eight CSV files.** ChocoboFix checks filenames, columns, types,
+   references, dates, limits, and topology before scheduling begins.
+3. **Generate plans.** The service runs A, B, and C as isolated worker jobs.
+4. **Review the result.** The schedule page shows activities by week, project,
+   contract, and coordinator. Status and timing are visible without opening a
+   raw CSV file.
+5. **Inspect the reason.** Activity details show the locations, access type,
+   predecessors, and constraints behind the selected week.
+6. **Approve a version.** Approvals are tied to the exact plan and validation
+   result that the approver reviewed.
+7. **Export the submission.** Each policy downloads as the three CSV files
+   expected by the PS1 validator.
+
+The global **Schedules** area keeps schedules separate from project setup. A
+planner can filter and compare work across projects without entering every
+project individually.
+
+## What makes ChocoboFix different
+
+### The export is the source of truth
+
+After solving, ChocoboFix writes the CSV files, reads them again, and validates
+the written result. The interface does not report success from a separate
+in-memory representation that could disagree with the submitted files.
+
+### Solving and checking are separate
+
+The solver searches for a plan. The checker independently decides whether the
+export obeys the implemented rules. A solver result is not accepted merely
+because the solver produced it.
+
+### The schedule is designed for people
+
+The interface leads with the operational result: what happens, when it happens,
+where access is required, who coordinates it, and whether it finishes early,
+on time, or late. Dense source data remains available, but it is not the first
+thing a worker has to interpret.
+
+### Plans have history
+
+The service records plan versions, validation state, approvals, assignments,
+and security-relevant actions. Roles are enforced by the service rather than
+only by hiding buttons in the browser.
+
+### It works without a hosted dependency
+
+The solver, checker, service, interface, and SQLite store can run on one
+machine. A network connection is needed only for the initial dependency fetch
+or when the team chooses to host the service.
+
+## Repository layout
+
+```text
+client/          React application and browser tests
+src/core/        CSV parsing, domain model, topology, scoring, and export
+src/solver/      CP-SAT scheduling model for policies A, B, and C
+src/validator/   independent conformance checker
+src/service/     HTTP API, authentication, SQLite store, and worker supervision
+src/cli/         trackaccess command-line program
+tests/           native, store, integration, and multi-user tests
+tools/derive/    rule cross-check and stress-data utilities
+data/upstream/   recorded copy of the public PS1 data
+web-dist/        production frontend build
+docs/            architecture decisions and release-readiness evidence
+```
+
+`web/` is the legacy interface. The active frontend is in `client/` and builds
+to `web-dist/`.
+
+## Build from a clean checkout
+
+### macOS
+
+Install Apple's command-line tools and CMake:
+
+```bash
+xcode-select --install
+brew install cmake
+```
+
+### Ubuntu 24.04
+
+```bash
+sudo apt-get update
+sudo apt-get install -y \
+  build-essential cmake curl ca-certificates \
+  libsqlite3-dev libssl-dev python3
+```
+
+### Build the native programs and frontend
 
 ```bash
 ./scripts/fetch_deps.sh
+
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
+
 npm ci --prefix client
 npm run build --prefix client
 ```
 
-`fetch_deps.sh` downloads OR-Tools 9.14.6206 for the host triple and
-cpp-httplib 0.18.3, printing and verifying SHA-256 for both. Roughly 46 MB.
+The dependency script downloads pinned builds of OR-Tools and cpp-httplib and
+verifies their SHA-256 values. They are stored under `third_party/` and are not
+installed globally.
 
-### 3. Prove the build before trusting it
+## Run ChocoboFix locally
 
-```bash
-./build/test_core        # 120 checks: rules, counterexamples, mutations
-./build/test_store       # accounts, roles, approvals, concurrency
-./build/check_sample     # our checker must accept the organisers' own sample
-npm run check --prefix client
-```
-
-If any of those fail, stop — something in the rule model or the store changed.
-
-## Exact local launch command
-
-Single planner, offline, on this machine:
+For the first local start, provide an administrator account through an
+environment variable:
 
 ```bash
-./build/trackaccess-service   --host 127.0.0.1 --port 8080   --root ./var   --web ./web-dist   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data
+export CHOCOBOFIX_BOOTSTRAP_ADMIN='admin:replace-this-with-a-long-password'
+
+./build/trackaccess-service \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --root ./var \
+  --web ./web-dist \
+  --worker ./build/trackaccess \
+  --public-instance ./data/upstream/PS1/01_data
 ```
 
-Then open **http://127.0.0.1:8080/**. With no accounts yet, the sign-in screen
-offers to create the first administrator. To skip that prompt:
+Open <http://127.0.0.1:8080/>. After the administrator exists, remove the
+variable from the current shell:
 
 ```bash
-./build/trackaccess-service   --host 127.0.0.1 --port 8080 --root ./var --web ./web-dist   --worker ./build/trackaccess   --public-instance ./data/upstream/PS1/01_data   --bootstrap-admin "admin:choose-a-long-password"
+unset CHOCOBOFIX_BOOTSTRAP_ADMIN
 ```
 
-`--bootstrap-admin` is ignored once any account exists. Other options:
-`--max-solves` (default 2), `--max-seconds` (120), `--session-idle` (1800),
-`--session-max` (28800).
+The browser bootstrap route is available only when the service binds to
+loopback. Do not place a bootstrap password in source code, a committed `.env`
+file, a screenshot, or a `VITE_` variable.
 
-The administrator then creates `planner`, `approver` and `viewer` accounts from
-**Settings → accounts**. Those four roles are what the workflow below assumes.
-
-For a shared or hosted deployment, put TLS in front and follow
-`docs/DEPLOYMENT.md`. The service binds loopback by default and warns if told
-to bind anywhere else.
-
-## Using it
-
-The workspace has four places: **Overview, Schedule, Activities, History**, plus
-**Settings**. Creating a plan is a separate four-step flow with named stages:
-
-**Upload → Check → Generate → Review**
-
-1. **Upload** — drop the eight CSVs, or press *Try sample project*. Files you have
-   already chosen are kept if a later selection is partial.
-2. **Check** — a plain summary of jobs, contracts and the planning window before
-   any dense table. If the data is wrong, every problem is listed with file, row,
-   field and what to correct; you can replace one file without starting over.
-3. **Generate** — the three scenarios carry plain labels ("Keep existing access
-   limits", "Meet planned completion dates", "Allow limited extra access") with a
-   sentence each, and a panel listing what never changes whichever you pick.
-   Solver settings are behind *Advanced*. There is no progress percentage,
-   because the solver cannot say how far through it is.
-4. **Review** — what happened, in a sentence, before the numbers: whether all
-   work is scheduled, which contracts finish late, and what extra access it cost.
-
-Then **Schedule** is the working area — a timeline where each bar is one night,
-a per-week network view, and a detail panel that answers *"why not another
-week?"* for any job. **Adjust schedule** applies a disruption and shows the
-consequences before anything is accepted. **History** holds every version, who
-made it, who published it, and the activity log.
-
-A version is only *Published* when an approver signs it off, and the approval is
-bound to the exact plan and check result they were shown.
-
-Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Switching language
-keeps you where you are. Text size adjusts from the header. Every control is
-keyboard reachable; no interaction needs colour, hover or dragging alone.
-
-**"Checked" means the plan passed our own rule checker.** It is not official
-certification and not permission to dispatch work. The interface says so on the
-review screen and in Help.
-
-## Running the solver from the command line
+## Generate the three policies from the command line
 
 ```bash
-./build/trackaccess solve   --data data/upstream/PS1/01_data   --out  out/public   --scenario all --seconds 120 --workers 8
+./build/trackaccess solve \
+  --data ./data/upstream/PS1/01_data \
+  --out ./out/public \
+  --scenario all \
+  --seconds 120 \
+  --workers 8
 ```
 
-Writes `out/public/{A,B,C}/` each containing `SCHEDULE_ACCESS.csv`,
-`SCHEDULE_OCCUPANCY.csv`, `RESULTS.csv` and `VALIDATION.json`. The exported
-files are re-read and re-checked before the run reports success.
+Successful output is written to:
 
-`--scenario` takes `A`, `B`, `C` or `all`. `--seconds` is the per-scenario
-budget; `--seed` makes a run reproducible; `--strict-buffers` uses the stricter
-reading of rule 6 (see `docs/DERIVED_RULES.md` R6c). Ctrl-C stops the search and
-keeps the best complete plan already found.
-
-Exit codes: `0` success · `1` usage or input error · `2` no plan produced ·
-`3` the plan failed the independent check.
-
-### When a scenario's policy cannot be met
-
-Scenario B forbids any overrun, and Scenario A forbids any extra access-night. On
-a sufficiently tight instance those policies are unsatisfiable, and the tool then
-reports `infeasible` and **exports nothing** — an unsubmittable plan should not
-look submittable.
-
-`--fallback` changes that: the scenario's own policy is priced instead of
-forbidden, while **every physical safety rule stays hard**. The result is written
-with a `NOT_SUBMISSION_READY.txt` beside it, the run says so loudly, and the
-store **refuses to approve it** no matter who asks. Use it to see how far out of
-policy an instance is; never submit it as a conforming answer.
-
-## Explain, repair, compare## Explain, repair, compare
-
-**Why not earlier?** — test whether an activity could take an access in a given
-week, and if not, which rule stands in the way:
-
-```bash
-./build/trackaccess explain --data data/upstream/PS1/01_data \
-  --activity A004 --week 16 --scenario A
+```text
+out/public/A/
+out/public/B/
+out/public/C/
 ```
 
-It answers one of three things, and never confuses them: *yes* (with the cascade
-it causes and its cost), *proven impossible* (naming the binding rule), or *not
-established within the budget* — which is not evidence of impossibility.
+Each directory contains the three submission CSVs and `VALIDATION.json`.
 
-**Disruption repair** — urgent maintenance takes nights away from a location;
-re-plan around it while keeping unaffected commitments:
-
-```bash
-./build/trackaccess repair --data data/upstream/PS1/01_data --out out/repaired \
-  --supply "SEC:BET:H01_H02:EB@15=0" --supply "SEC:BET:H01_H02:EB@16=0" \
-  --scenario A
-```
-
-Reports the objective before and after, how many activity-weeks moved, and which
-activities changed. The minimal-change preference is a tie-break only: it is
-**never** part of the competition objective, and the score reported afterwards is
-recomputed from the written plan without it.
-
-**Before/after** — diff two exported submissions:
-
-```bash
-./build/trackaccess compare --data data/upstream/PS1/01_data \
-  --before out/public/A --after out/repaired
-```
-
-**Diagnose an infeasible instance** — lift one rule group at a time to find which
-one binds:
-
-```bash
-./build/trackaccess diagnose --data <instance> --scenario A
-```
-
-## Check a submission
+Validate any exported policy independently:
 
 ```bash
 ./build/trackaccess validate \
-  --data data/upstream/PS1/01_data \
-  --submission out/public/A
+  --data ./data/upstream/PS1/01_data \
+  --submission ./out/public/A
 ```
 
-Prints the JSON conformance report and exits `3` if any hard rule is breached.
-An independently written Python implementation of the same rules is available for
-cross-checking — agreement between the two is evidence, since they share no code:
+The command exits with a non-zero status if the data is invalid, no plan is
+produced, or the written schedule fails validation.
+
+## Test before deployment
 
 ```bash
-python3 tools/derive/crosscheck.py data/upstream/PS1/01_data out/public/A
+ctest --test-dir build --output-on-failure
+./tests/integration.sh build
+
+npm run test:coverage --prefix client
+npm run build --prefix client
+npm audit --prefix client --audit-level=moderate
 ```
 
-## Run the web application
+The GitHub workflows also build the final Docker runtime image. The Dockerfile
+checks the copied solver with `ldd` and runs a relocated A/B/C smoke test. This
+is important because build-stage tests cannot detect a library that was omitted
+from the final image.
 
-Offline / single planner (loopback only, token required):
+## Cloud Run deployment
+
+The root `Dockerfile` builds the frontend, native service, and final runtime
+image. Cloud Run supplies the `PORT` variable automatically; keep the service
+container port at `8080`.
 
 ```bash
-./build/trackaccess-service \
-  --host 127.0.0.1 --port 8080 \
-  --root ./var --web ./web --worker ./build/trackaccess \
-  --public-instance ./data/upstream/PS1/01_data
+gcloud run deploy chocobofix \
+  --source . \
+  --region asia-southeast1 \
+  --allow-unauthenticated \
+  --port 8080
 ```
 
-It prints a bearer token; open `http://127.0.0.1:8080/?token=<token>`.
+Before deploying, read [`APPLY_AND_DEPLOY.md`](APPLY_AND_DEPLOY.md). Deploy a
+candidate revision first and verify that the actual web application can create,
+validate, store, and reopen A, B, and C.
 
-Judging / shared deployment (no token, put TLS in front — see Deployment):
+### Important storage warning
 
-```bash
-./build/trackaccess-service \
-  --host 0.0.0.0 --port 8080 --auth none \
-  --root ./var --web ./web --worker ./build/trackaccess \
-  --public-instance ./data/upstream/PS1/01_data
-```
+The default container command stores SQLite data and generated artifacts under
+`/var/lib/trackaccess`. Cloud Run's container filesystem is temporary. A new
+revision or replacement instance does not provide durable application state.
 
-Workflow in the interface: **Import → Generate → Schedule → Network → Check →
-Repair → Export**. Drop the eight CSVs (or press *Load public instance*), pick a scenario,
-generate, then inspect the timeline, the network occupancy per week, the
-conformance report, and download the competition files. Selecting an activity
-shows the locations it books and its buffer, and offers "why not another week?"
-for any week you name. The Repair tab applies a disruption and shows what it
-costs before you accept it.
+Do not treat the default Cloud Run configuration as durable production storage.
+Back up the database and plan files before a redeployment, and move state to a
+supported persistent design before real operational use. Do not place a live
+SQLite database on Cloud Storage FUSE.
 
-Interface languages: English, Bahasa Melayu, 简体中文, தமிழ். Text size is
-adjustable from the header. Every control is keyboard reachable; there is no
-drag-only interaction.
+## Security boundaries
 
-## Tests
+The current service includes:
 
-```bash
-./build/test_core                    # 120 rule, counterexample and mutation checks
-./build/test_store                   # 94 account, role, approval and concurrency checks
-./build/check_sample                 # our checker must accept the upstream sample
-./tests/integration.sh build         # 132 end-to-end, API and security checks
-python3 tests/test_multiuser.py      # the shared-project suite on its own
-ctest --test-dir build               # runs the three C++ suites under CTest
-```
+- prepared SQL statements and strict CSV validation;
+- PBKDF2 password hashing and hashed bearer sessions;
+- idle and absolute session expiry;
+- server-enforced roles and project permissions;
+- origin checks for browser writes;
+- login, POST, upload, queue, worker, and solve limits;
+- private API caching rules and session-scoped client caches;
+- bounded worker logs with specific launch and loader errors;
+- audit events containing actor, action, object, result, time, and correlation ID.
 
-## Platform and feature support
+The current build is intended for one organisation per deployment. It is not a
+finished multi-tenant service. Audit rows are useful but are not independently
+tamper-evident. Automated retention, deletion, legal-hold, and complete PII
+export workflows still require implementation and an approved operating policy.
 
-**Tested** means built and executed here, with the result recorded in
-`docs/TEST_REPORT.md`. Nothing else is claimed.
+See [`docs/RELEASE_READINESS.md`](docs/RELEASE_READINESS.md) for the control
+matrix and known limits. Report security concerns using [`SECURITY.md`](SECURITY.md).
 
-| Platform | Build | Tests | Notes |
-| --- | --- | --- | --- |
-| **arm64 macOS 15.6.1** | **tested** | **tested** | Apple clang 17, CMake 4.4.3, OR-Tools 9.14.6206 arm64 |
-| x86_64 macOS | not built | not run | `fetch_deps.sh` selects the right asset; unverified |
-| x86_64 / arm64 Linux | **not built** | **not run** | CMake is portable and an OR-Tools asset is selected, but nothing was compiled or executed |
-| Windows | not attempted | — | no configuration written |
-| Container image | built by Cloud Run | final image validates the solver and its OR-Tools runtime before release |
+## Release checklist
 
-| Feature | Status |
-| --- | --- |
-| Scenarios A / B / C, proven optimal on the public instance | tested |
-| Independent checker, cross-checked by a second implementation | tested |
-| Explain, repair, compare, diagnose, fallback, strict-buffers | tested |
-| Accounts, roles, sessions, project isolation | tested |
-| Plan versions, validation-bound approvals, revocation, invalidation | tested |
-| Optimistic concurrency, audit trail | tested |
-| Four-language interface | 302 strings x 4 languages, none missing; **ms/zh/ta unreviewed by a fluent speaker** |
-| TLS-terminated hosted shape | deployed on Cloud Run; Google terminates HTTPS |
-| Backup / restore | procedure written; **restore never rehearsed** |
-| CI | GitHub Actions runs native and frontend checks on pushes and pull requests |
+Before presenting or publishing a new revision:
 
-Sanitizers:
+1. Confirm the Git commit used by the deployed image.
+2. Run native, integration, frontend, and final-container checks.
+3. Back up and verify the existing database and generated plans.
+4. Generate A, B, and C through the browser, not only through the CLI.
+5. Reopen each stored plan and download its submission files.
+6. Validate those downloads independently.
+7. Check a planner, approver, viewer, and disabled account.
+8. Test navigation and schedule overflow at a 320-pixel viewport.
+9. Record the image digest, revision, test results, and rollback owner.
+10. Keep the previous working revision available until verification finishes.
 
-```bash
-cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
-  -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer -g" \
-  -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"
-cmake --build build-asan -j && ASAN_OPTIONS=detect_leaks=0 ./build-asan/test_core
-```
+## Current limitations
 
-Measured results are in `docs/TEST_REPORT.md`.
+- One organisation per deployment; tenant isolation is not complete.
+- Cloud Run container-local SQLite storage is not durable.
+- Audit records are not protected by an external immutable checkpoint.
+- RTO and RPO have not been measured in a production restore drill.
+- Policy and regulatory compliance require operator and legal review.
+- Translation should not be advertised until every interface string has been
+  translated and reviewed by fluent speakers.
 
-## Deployment
+These limits are recorded so that a successful demonstration is not mistaken
+for an unsupported production guarantee.
 
-The public service is
-[chocobofix-53566346633.asia-southeast1.run.app](https://chocobofix-53566346633.asia-southeast1.run.app/).
-To update the existing Cloud Run service from a clean checkout:
+## Repository
 
-```bash
-gcloud config set project YOUR_PROJECT_ID
-gcloud run deploy chocobofix --source . --region asia-southeast1 \
-  --allow-unauthenticated --min 1 --max 1
-```
+<https://github.com/driftsprits-stack/chocobofix>
 
-The root `Dockerfile` builds the React client and C++ service. Its final image
-also runs the sample validator, so deployment stops before release if the solver
-or an OR-Tools runtime library is missing. Keep one instance for this hackathon
-deployment because the current SQLite store is local to the Cloud Run instance.
-See `docs/DEPLOYMENT.md` for verification and account setup.
+## Licence and third-party software
 
-## Repository layout
+ChocoboFix was created for the NebulaX Hackathon PS1 submission. The public PS1
+dataset remains the property of its authors.
 
-```
-src/core/        domain model, strict CSV I/O, topology expansion, scoring, export
-src/solver/      CP-SAT model for Scenarios A / B / C
-src/validator/   independent conformance checker (shares no constraint code)
-src/cli/         trackaccess command line
-src/service/     HTTP application service, job queue, worker supervision
-client/          React browser interface and frontend tests
-web/             superseded static interface retained for reference
-tests/           unit, mutation, metamorphic, integration and security tests
-tools/derive/    re-runnable rule-derivation and cross-check scripts
-docs/            derived rules, architecture, requirements matrix, test report
-data/upstream/   vendored PS1 instance at a recorded commit, with hashes
-out/public/      generated results for the public instance
-```
+Third-party dependencies are fetched rather than committed:
 
-## Licences
+- **Google OR-Tools 9.14.6206** — Apache License 2.0;
+- **cpp-httplib 0.18.3** — MIT License;
+- frontend package licences are recorded by `client/package-lock.json`.
 
-This project is provided for the NebulaX hackathon submission.
-Third-party components, fetched by `scripts/fetch_deps.sh` and not vendored in
-this repository:
-
-- **OR-Tools 9.14.6206** — Apache License 2.0. Bundles abseil-cpp, Protocol
-  Buffers, RE2, SCIP, SoPlex, HiGHS, CBC/CLP/CGL/OSI/CoinUtils, Boost and zlib;
-  their notices ship inside the distribution under `third_party/or-tools_*/share/doc`.
-- **cpp-httplib 0.18.3** — MIT License.
-
-SHA-256 of both is printed and verified by `scripts/fetch_deps.sh`.
-The PS1 instance data under `data/upstream/` belongs to the problem authors and
-is vendored unmodified at commit `966c976`.
-
-## Release and security status
-
-See [`docs/RELEASE_AUDIT.md`](docs/RELEASE_AUDIT.md) for the verified control matrix, known limits, missing operator details, and production work that remains. See [`SECURITY.md`](SECURITY.md) for private vulnerability reporting and security boundaries.
+Review the dependency notices before redistributing the application outside the
+hackathon context.
