@@ -1,5 +1,5 @@
 # Google Cloud Run build entry point.
-FROM node:22-slim AS client
+FROM node:25-slim AS client
 WORKDIR /client
 COPY client/package.json client/package-lock.json ./
 RUN npm ci --no-audit --no-fund
