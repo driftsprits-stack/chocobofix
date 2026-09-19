@@ -1,6 +1,8 @@
 .git
 .github
 .claude
+.env
+.env.*
 build
 build-*
 web-dist
@@ -15,5 +17,12 @@ client/test-results
 client/playwright-report
 *.zip
 *.sqlite*
+*.db*
+*.log
+*.pem
+*.key
+*.p12
+*.pfx
+service-account*.json
 .DS_Store
 __MACOSX

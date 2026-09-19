@@ -20,7 +20,7 @@ Security fixes apply to the current `master` branch. The project has no long-ter
 - Login, write, queue, upload, CPU, memory, and output limits are bounded.
 - The browser rejects cross-site writes. The service sends CSP, HSTS, frame, MIME, referrer, opener, and resource-policy headers.
 - Audit events contain a SHA-256 chain. The service can verify this chain.
-- GitHub secret scanning and push protection are active. CI runs tests, coverage gates, `npm audit`, and CodeQL. Dependabot opens update pull requests.
+- The repository defines tests, coverage gates, `npm audit`, CodeQL, dependency review, and Dependabot updates. Repository owners must enable Actions, secret scanning, push protection, and required checks in GitHub settings.
 
 ## Limits
 

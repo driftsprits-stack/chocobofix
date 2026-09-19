@@ -1,42 +1,35 @@
-# --- build output ----------------------------------------------------------
-build/
-build-*/
-web-dist/
-node_modules/
-
-# --- fetched dependencies (restored by scripts/fetch_deps.sh) --------------
-third_party/or-tools_*/
-third_party/httplib.h
-
-# --- runtime state: never distributed -------------------------------------
-# The service's store, including the live SQLite database and its write-ahead
-# log and shared-memory sidecars. Keep these locally; they hold real accounts
-# and project data and must not travel in a source package.
-var/
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm
-*.db
-*.db-wal
-*.db-shm
-
-# --- credentials -----------------------------------------------------------
+.DS_Store
 .env
 .env.*
 !.env.example
-*.pem
-*.key
-service-account*.json
 
-# --- incidental ------------------------------------------------------------
-*.tmp
-.DS_Store
+.claude/
+.idea/
+.vscode/
 
-# Local verification outputs
+build/
+build-*/
+third_party/
+web-dist/
+node_modules/
+client/node_modules/
 client/coverage/
 client/test-results/
 client/playwright-report/
 
-# Local submission bundles are generated artifacts, not source files.
-submission-final/
-submission-strict/
+var/
+out/
+*.sqlite
+*.sqlite-*
+*.db
+*.db-wal
+*.db-shm
+*.log
+
+*.pem
+*.key
+*.p12
+*.pfx
+service-account*.json
+*.zip
+__MACOSX/

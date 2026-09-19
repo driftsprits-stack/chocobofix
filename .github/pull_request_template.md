@@ -1,11 +1,22 @@
 ## Change
 
-Describe the user-visible result and the reason for it.
+State what changed and why.
+
+## Risk
+
+State the data, security, solver, deployment, and accessibility risks.
 
 ## Verification
 
-- [ ] I ran the checks that cover this change.
-- [ ] I did not add credentials, private data, generated databases, or build output.
-- [ ] I checked authentication and project isolation when this change touches an API route.
-- [ ] I checked keyboard use and a 320 px viewport when this change touches the interface.
-- [ ] I updated the API, architecture, or operations document when a contract changed.
+- [ ] Native unit and integration tests pass.
+- [ ] Client tests, coverage, build, and dependency audit pass.
+- [ ] Browser tests pass at desktop and mobile widths.
+- [ ] The final container solver smoke test passes for A, B, and C.
+- [ ] No secret, token, database, private input, or generated user data is in the diff.
+- [ ] Data migration and rollback steps are documented when storage changes.
+- [ ] User-visible text is short and direct.
+
+## Review
+
+- [ ] A person other than the author reviewed this change.
+- [ ] All review comments are resolved.
