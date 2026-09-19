@@ -21,7 +21,7 @@ jobs:
       - name: Install native prerequisites
         run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
       - name: Cache pinned native dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: third_party
           key: ortools-9.14.6206-${{ runner.os }}-${{ runner.arch }}
@@ -37,7 +37,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Cache pinned native dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: third_party
           key: ortools-9.14.6206-${{ runner.os }}-${{ runner.arch }}
@@ -74,7 +74,7 @@ jobs:
           cache: npm
           cache-dependency-path: client/package-lock.json
       - run: sudo apt-get update -qq && sudo apt-get install -y -qq build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev python3
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         with:
           path: third_party
           key: ortools-9.14.6206-${{ runner.os }}-${{ runner.arch }}
