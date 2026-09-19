@@ -1,7 +1,38 @@
+# --- build output ----------------------------------------------------------
 build/
 build-*/
-var/
+web-dist/
+node_modules/
+
+# --- fetched dependencies (restored by scripts/fetch_deps.sh) --------------
 third_party/or-tools_*/
 third_party/httplib.h
+
+# --- runtime state: never distributed -------------------------------------
+# The service's store, including the live SQLite database and its write-ahead
+# log and shared-memory sidecars. Keep these locally; they hold real accounts
+# and project data and must not travel in a source package.
+var/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+
+# --- credentials -----------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+service-account*.json
+
+# --- incidental ------------------------------------------------------------
 *.tmp
 .DS_Store
+
+# Local verification outputs
+client/coverage/
+client/test-results/
+client/playwright-report/

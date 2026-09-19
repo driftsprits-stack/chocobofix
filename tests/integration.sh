@@ -13,6 +13,32 @@ chk(){ if [ "$1" = "$2" ]; then ok "$3"; else no "$3 (got '$1', expected '$2')";
 cleanup(){ [ -n "${SVC:-}" ] && kill "$SVC" 2>/dev/null; rm -rf "$TMP"; }
 trap cleanup EXIT
 
+echo "== CLI: published artefacts are reproducible =="
+# Regression guard for the defect recorded as D1 in docs/BASELINE_AUDIT.md:
+# multi-worker CP-SAT returned a different optimum of equal value on each run,
+# which made a published provenance hash unreproducible. `solve` must default to
+# a reproducible search, and must say so in PROVENANCE.json.
+"$BUILD/trackaccess" solve --data "$DATA" --out "$TMP/rep1" --scenario C --seconds 60 >/dev/null 2>&1
+"$BUILD/trackaccess" solve --data "$DATA" --out "$TMP/rep2" --scenario C --seconds 60 >/dev/null 2>&1
+for f in SCHEDULE_ACCESS.csv SCHEDULE_OCCUPANCY.csv RESULTS.csv; do
+  a=$(shasum -a 256 "$TMP/rep1/C/$f" | cut -d" " -f1)
+  b=$(shasum -a 256 "$TMP/rep2/C/$f" | cut -d" " -f1)
+  chk "$a" "$b" "scenario C $f is identical across two default runs"
+done
+grep -q '"reproducible": true' "$TMP/rep1/C/PROVENANCE.json" \
+  && ok "PROVENANCE.json records the run as reproducible" \
+  || no "PROVENANCE.json records the run as reproducible"
+# An explicitly parallel search must be labelled as not reproducible rather than
+# silently published as if it were.
+"$BUILD/trackaccess" solve --data "$DATA" --out "$TMP/rep8" --scenario C --seconds 20 --workers 8 \
+  > "$TMP/rep8.log" 2>&1
+grep -q '"reproducible": false' "$TMP/rep8/C/PROVENANCE.json" \
+  && ok "parallel search is recorded as not reproducible" \
+  || no "parallel search is recorded as not reproducible"
+grep -qi "NOT reproducible" "$TMP/rep8.log" \
+  && ok "parallel search warns on stderr" \
+  || no "parallel search warns on stderr"
+
 echo "== CLI: solve all three scenarios =="
 "$BUILD/trackaccess" solve --data "$DATA" --out "$TMP/out" --scenario all --seconds 60 --workers 8 \
   > "$TMP/solve.log" 2>&1
@@ -226,6 +252,23 @@ chk "$(code "${AUTH[@]}" -X POST "$B/projects/$PID/jobs?instance_id=$IID&scenari
 VID=$(curl -s "${AUTH[@]}" "$B/projects/$PID/versions" | python3 -c 'import json,sys;d=json.load(sys.stdin)["versions"];print(d[0]["id"] if d else "")' 2>/dev/null)
 chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/SCHEDULE_ACCESS.csv")" "200" "a competition file downloads from a version"
 chk "$(code "${AUTH[@]}" "$B/versions/$VID/files/ETC_PASSWD.csv")" "404" "a non-competition filename is refused"
+
+echo "== single-page routes resolve, and /api never returns a page =="
+# A deep link like /workspace must get the app shell so a refresh works. An
+# unknown /api path must stay JSON: answering it with HTML turns a 404 into a
+# parse error at the caller. A missing asset must stay a 404, not a blank page.
+for route in / /workspace /workspace/12/review /settings /no-such-route; do
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT$route")
+  chk "$code" "200" "GET $route serves the app shell"
+done
+ct=$(curl -sI "http://127.0.0.1:$PORT/api/v1/nope" | tr -d '\r' | awk -F': ' 'tolower($1)=="content-type"{print $2}')
+chk "$ct" "application/json" "an unknown /api path answers as JSON, not HTML"
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/api/v1/nope")
+chk "$code" "404" "an unknown /api path is a 404"
+body=$(curl -s "http://127.0.0.1:$PORT/api/v1/nope")
+case "$body" in *"<!doctype"*|*"<html"*) no "an unknown /api path must not return HTML";; *) ok "an unknown /api path must not return HTML";; esac
+code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/assets/definitely-missing.js")
+chk "$code" "404" "a missing asset stays a 404 rather than the shell"
 
 echo "== risk: interactive analyses obey the worker limit =="
 # Six explain requests at once, against a service allowing two concurrent

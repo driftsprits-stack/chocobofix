@@ -1,5 +1,8 @@
 {
   "strict_buffers": false,
   "fallback": false,
+  "reproducible": true,
+  "search_workers": 1,
+  "random_seed": 1,
   "supply_overrides": []
 }

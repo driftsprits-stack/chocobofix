@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>TrackAccess — railway possession planning</title>
+<title>ChocoboFix — railway track access planning</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
@@ -107,11 +107,14 @@
       <form id="signinForm" novalidate>
         <div class="field">
           <label for="su" data-i18n="username">Username</label>
-          <input type="text" id="su" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+          <input type="text" id="su" autocomplete="username" autocapitalize="none" spellcheck="false"
+                 required aria-describedby="suErr">
+          <p class="small field-err" id="suErr" role="alert"></p>
         </div>
         <div class="field">
           <label for="sp" data-i18n="password">Password</label>
-          <input type="password" id="sp" autocomplete="current-password" required>
+          <input type="password" id="sp" autocomplete="current-password" required aria-describedby="spErr">
+          <p class="small field-err" id="spErr" role="alert"></p>
         </div>
         <div id="signinMsg" role="alert" aria-live="polite"></div>
         <div class="row" style="margin-top:16px">

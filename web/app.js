@@ -80,6 +80,22 @@ function T(k) {
 }
 
 // ---------------------------------------------------------------- api
+// POST fields as an application/x-www-form-urlencoded body.
+//
+// Credentials must never go in a query string: URLs are written to server access
+// logs, kept in browser history, and forwarded in Referer headers. The service
+// reads these with httplib's get_param_value, which parses a form-encoded body
+// as well as a query string, so the body form needs no service change.
+function postForm(path, fields) {
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(fields)) body.set(k, v);
+  return api(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: body.toString(),
+  });
+}
+
 async function api(path, opts = {}) {
   const h = Object.assign({}, opts.headers || {});
   if (S.token) h['Authorization'] = 'Bearer ' + S.token;
@@ -230,25 +246,51 @@ function showSignin(msg) {
 }
 function hideSignin() { $('#signin').classList.add('hide'); $('#app').classList.remove('hide'); }
 
+let signinInFlight = false;
+
+function setFieldError(id, msg) {
+  const box = $(id);
+  if (!box) return;
+  box.textContent = msg || '';
+  const input = $(id === '#suErr' ? '#su' : '#sp');
+  if (input) input.setAttribute('aria-invalid', msg ? 'true' : 'false');
+}
+function clearFieldErrors() { setFieldError('#suErr', ''); setFieldError('#spErr', ''); }
+
 $('#signinForm').addEventListener('submit', async e => {
   e.preventDefault();
+  // One flight at a time. The disabled button alone is not enough: a second
+  // Enter keypress can arrive before the handler disables it.
+  if (signinInFlight) return;
+
   const u = $('#su').value.trim(), p = $('#sp').value;
-  if (!u || !p) return showSignin(T('err_need_both'));
+  clearFieldErrors();
+  showSignin('');
+  // Errors point at the field that is wrong, not at the form.
+  if (!u) setFieldError('#suErr', T('err_need_username'));
+  if (!p) setFieldError('#spErr', T('err_need_password'));
+  if (!u || !p) { (u ? $('#sp') : $('#su')).focus(); return; }
+
   const btn = $('#signinGo');
+  signinInFlight = true;
   btn.disabled = true;
   try {
     const health = await api('/api/v1/health');
-    const path = health.needs_bootstrap ? '/api/v1/bootstrap' : '/api/v1/auth/login';
-    const q = new URLSearchParams({ username: u, password: p });
-    const r = await api(path + '?' + q, { method: 'POST' });
-    if (health.needs_bootstrap) {                    // first administrator: sign in next
-      const r2 = await api('/api/v1/auth/login?' + q, { method: 'POST' });
-      return enter(r2);
+    const creds = { username: u, password: p };
+    if (health.needs_bootstrap) {
+      // First run: these details create the initial administrator, then sign in.
+      await postForm('/api/v1/bootstrap', creds);
+      return enter(await postForm('/api/v1/auth/login', creds));
     }
-    enter(r);
+    enter(await postForm('/api/v1/auth/login', creds));
   } catch (err) {
-    showSignin(err.message);
-  } finally { btn.disabled = false; $('#sp').value = ''; }
+    // The username stays in the field so a retry is one keystroke away. The
+    // password is cleared because it is the part that was probably wrong.
+    if (err.status === 401) setFieldError('#spErr', err.message);
+    else showSignin(err.message);
+    $('#sp').value = '';
+    $('#sp').focus();
+  } finally { signinInFlight = false; btn.disabled = false; }
 });
 $('#trySample').addEventListener('click', () => openDemoInfo());
 $('#signinHelp').addEventListener('click', () => openHelp());
@@ -1263,7 +1305,7 @@ async function viewSettings(root) {
           el('div', { class: 'field', style: 'flex:1' }, el('label', { text: T('settings_role') }), nr)),
         el('div', { class: 'row' }, el('button', { class: 'btn btn-primary', onclick: async () => {
           try {
-            await api('/api/v1/users?' + new URLSearchParams({ username: nu.value.trim(), password: np.value, role: nr.value }), { method: 'POST' });
+            await postForm('/api/v1/users', { username: nu.value.trim(), password: np.value, role: nr.value });
             render();
           } catch (e) { msg.textContent = ''; msg.append(errorNote(e)); }
         } }, T('acct_create'))),

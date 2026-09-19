@@ -35,6 +35,13 @@ struct Provenance {
   std::vector<std::tuple<std::string, Week, int>> supply_overrides;  // location, week, supply
   bool strict_buffers = false;
   bool fallback = false;
+  // True when this plan was produced by a search whose result is reproducible:
+  // a single worker and a fixed seed. Multi-worker CP-SAT races its workers
+  // against wall-clock time and may return a different optimum of equal value on
+  // every run, which would make a published artefact hash unreproducible.
+  bool deterministic = true;
+  int workers = 1;
+  int random_seed = 1;
   std::string solver_detail;
 };
 

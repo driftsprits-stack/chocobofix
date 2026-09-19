@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -146,6 +147,8 @@ struct Instance {
   std::unordered_map<std::string, LocIdx> location_by_id;
   std::unordered_map<std::string, ConIdx> contract_by_number;
   std::unordered_map<std::string, ActIdx> activity_by_id;
+  // Live closure crossover sets, derived from shared interchange station IDs.
+  std::map<LocIdx, std::vector<LocIdx>> interchange_peers;
 
   // Pairs (a,b), a<b, that may never share a week under the ADOPTED reading of
   // rule 6: their zones reach each other's worksite and they share no location,

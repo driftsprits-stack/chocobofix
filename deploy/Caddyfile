@@ -6,7 +6,7 @@
 #
 #   caddy run --config deploy/Caddyfile
 
-trackaccess.example.org {
+{$SITE_DOMAIN} {
 	encode gzip
 
 	# The service caps uploads at 32 MiB; refuse anything larger before it

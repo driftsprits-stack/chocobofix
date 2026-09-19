@@ -36,6 +36,16 @@ enum class Cap {
 };
 bool RoleHas(Role r, Cap c);
 
+struct Assignment {
+  long long project_id = 0;
+  long long instance_id = 0;
+  std::string activity_id;
+  long long coordinator_id = 0;
+  std::string coordinator_name;
+  long long assigned_by = 0;
+  std::string assigned_at;
+};
+
 struct User {
   long long id = 0;
   std::string username;
@@ -45,6 +55,7 @@ struct User {
 };
 
 struct Project {
+  std::string owner_name;
   long long id = 0;
   std::string name;
   long long owner_id = 0;
@@ -149,6 +160,7 @@ class Store {
   bool CreateProject(const std::string& name, long long owner_id, Project* out, std::string* err);
   std::optional<Project> ProjectById(long long id);
   std::vector<Project> ListProjects();
+  std::vector<Project> ListVisibleProjects(const User& user, long long before, int limit);
   // Optimistic concurrency: fails if `expected_revision` is not current.
   bool BumpProjectRevision(long long id, long long expected_revision, std::string* err);
 
@@ -181,6 +193,34 @@ class Store {
              const std::string& correlation_id, const std::string& detail);
   std::vector<AuditEvent> ListAudit(int limit, const std::string& object_type,
                                     const std::string& object_id);
+
+  // --- coordinator assignments ------------------------------------------
+  // Scoped to project + instance + activity id. `coordinator_id` of 0 clears
+  // the assignment, which is how an activity returns to "Unassigned".
+  bool SetAssignment(long long project_id, long long instance_id,
+                     const std::string& activity_id, long long coordinator_id,
+                     long long assigned_by, std::string* err);
+  std::vector<Assignment> ListAssignments(long long project_id, long long instance_id);
+
+  // --- profile photos ----------------------------------------------------
+  bool SetUserPhoto(long long user_id, const std::string& media_type,
+                    const std::string& bytes, std::string* err);
+  bool ClearUserPhoto(long long user_id);
+  bool GetUserPhoto(long long user_id, std::string* media_type, std::string* bytes);
+  // Cheap existence check, so a list of people can say who has a photo without
+  // the client discovering it by requesting each one and collecting 404s.
+  bool HasUserPhoto(long long user_id);
+
+  // Audit events belonging to one project, and nothing else.
+  //
+  // `ListAudit` is deliberately global: a workspace administrator reviewing the
+  // whole installation needs account events too. A project view must not use it.
+  // An event belongs to a project when it names that project, an instance under
+  // it, or a plan version under it. Account-level events (sign-in, user.create,
+  // user.role, authz.deny) belong to no project and are never returned here,
+  // even to an administrator - the project view is scoped by the object, not by
+  // the reader's privilege.
+  std::vector<AuditEvent> ListProjectAudit(long long project_id, int limit);
 
  private:
   bool Exec(const std::string& sql, std::string* err);

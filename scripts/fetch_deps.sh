@@ -22,8 +22,12 @@ case "$os/$arch" in
      exit 1;;
 esac
 
-if ls third_party/or-tools_* >/dev/null 2>&1; then
-  echo "OR-Tools already present: $(ls -d third_party/or-tools_*)"
+expected_dir="third_party/${ASSET%.tar.gz}"
+if [ "$os" = Linux ]; then
+  expected_dir="third_party/or-tools_${arch}_Ubuntu-24.04_cpp_v${ORTOOLS_BUILD}"
+fi
+if [ -d "$expected_dir" ]; then
+  echo "OR-Tools already present for this platform: $expected_dir"
 else
   echo "Fetching $ASSET"
   curl -fL --retry 3 -o third_party/ortools.tar.gz \

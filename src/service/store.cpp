@@ -47,6 +47,16 @@ class Stmt {
   }
   long long Int64(int c) { return sqlite3_column_int64(s_, c); }
   int Int(int c) { return sqlite3_column_int(s_, c); }
+  // Binary-safe. Bind(const std::string&) uses bind_text with length -1, which
+  // stops at the first NUL - fine for text, silently destructive for an image.
+  void BindBlob(int i, const std::string& v) {
+    sqlite3_bind_blob64(s_, i, v.data(), static_cast<sqlite3_uint64>(v.size()), SQLITE_TRANSIENT);
+  }
+  std::string Blob(int c) {
+    const void* p = sqlite3_column_blob(s_, c);
+    const int n = sqlite3_column_bytes(s_, c);
+    return (p && n > 0) ? std::string(static_cast<const char*>(p), static_cast<size_t>(n)) : std::string();
+  }
 
  private:
   sqlite3_stmt* s_ = nullptr;
@@ -168,6 +178,7 @@ bool Store::Open(const std::string& path, std::string* err) {
       owner_id INTEGER NOT NULL REFERENCES users(id),
       revision INTEGER NOT NULL DEFAULT 1,
       created_at TEXT NOT NULL);
+    CREATE INDEX IF NOT EXISTS ix_project_owner ON projects(owner_id,id);
     CREATE TABLE IF NOT EXISTS instances (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       project_id INTEGER NOT NULL REFERENCES projects(id),
@@ -220,6 +231,33 @@ bool Store::Open(const std::string& path, std::string* err) {
       correlation_id TEXT NOT NULL,
       detail TEXT NOT NULL);
     CREATE INDEX IF NOT EXISTS ix_audit_object ON audit(object_type, object_id);
+
+    -- Who coordinates an activity. Communication metadata: it does not assert
+    -- crew availability, qualification, or track-access authorisation, and the
+    -- solver never reads it.
+    --
+    -- Scoped to project + instance + activity id, not the activity id alone.
+    -- Two uploads can legitimately carry the same activity ids while describing
+    -- different work, so an assignment must not follow an id across instances.
+    CREATE TABLE IF NOT EXISTS activity_assignments (
+      project_id     INTEGER NOT NULL REFERENCES projects(id),
+      instance_id    INTEGER NOT NULL REFERENCES instances(id),
+      activity_id    TEXT    NOT NULL,
+      coordinator_id INTEGER NOT NULL REFERENCES users(id),
+      assigned_by    INTEGER NOT NULL REFERENCES users(id),
+      assigned_at    TEXT    NOT NULL,
+      PRIMARY KEY (project_id, instance_id, activity_id));
+    CREATE INDEX IF NOT EXISTS ix_assign_scope
+      ON activity_assignments(project_id, instance_id);
+
+    -- Profile photos, stored as bytes with a verified media type. Held here
+    -- rather than on disk so a restore of the database restores the avatars
+    -- with it; they are small by construction (see the size cap in the handler).
+    CREATE TABLE IF NOT EXISTS user_photos (
+      user_id    INTEGER PRIMARY KEY REFERENCES users(id),
+      media_type TEXT NOT NULL,
+      bytes      BLOB NOT NULL,
+      updated_at TEXT NOT NULL);
   )SQL", err);
 }
 
@@ -448,6 +486,28 @@ std::vector<Project> Store::ListProjects() {
     Project p;
     p.id = q.Int64(0); p.name = q.Text(1); p.owner_id = q.Int64(2);
     p.revision = q.Int64(3); p.created_at = q.Text(4);
+    out.push_back(p);
+  }
+  return out;
+}
+
+// One bounded query joins owner names and filters access before pagination.
+std::vector<Project> Store::ListVisibleProjects(const User& user, long long before, int limit) {
+  TA_STORE_LOCK();
+  std::vector<Project> out;
+  const bool reviewer = user.role == Role::kAdministrator || user.role == Role::kApprover;
+  const std::string sql = std::string("SELECT p.id,p.name,p.owner_id,p.revision,p.created_at,u.username FROM projects p JOIN users u ON u.id=p.owner_id WHERE p.id<? ") +
+    (reviewer ? "" : "AND p.owner_id=? ") + "ORDER BY p.id DESC LIMIT ?";
+  Stmt q(db_, sql.c_str());
+  if (!q.ok()) return out;
+  int bind = 1;
+  q.Bind(bind++, before > 0 ? before : 9223372036854775807LL);
+  if (!reviewer) q.Bind(bind++, user.id);
+  q.Bind(bind, std::max(1, std::min(limit, 101)));
+  while (q.Step()) {
+    Project p;
+    p.id=q.Int64(0); p.name=q.Text(1); p.owner_id=q.Int64(2);
+    p.revision=q.Int64(3); p.created_at=q.Text(4); p.owner_name=q.Text(5);
     out.push_back(p);
   }
   return out;
@@ -727,6 +787,147 @@ std::vector<AuditEvent> Store::ListAudit(int limit, const std::string& object_ty
     out.push_back(e);
   }
   return out;
+}
+
+
+std::vector<AuditEvent> Store::ListProjectAudit(long long project_id, int limit) {
+  TA_STORE_LOCK();
+  std::vector<AuditEvent> out;
+  // object_id is TEXT and row ids are written with std::to_string, so the
+  // subqueries cast rather than relying on SQLite's type affinity.
+  static const char* kSql =
+      "SELECT a.id,a.ts,a.actor_id,COALESCE(u.username,''),a.action,a.object_type,"
+      "a.object_id,a.result,a.correlation_id,a.detail FROM audit a "
+      "LEFT JOIN users u ON u.id=a.actor_id "
+      "WHERE (a.object_type='project' AND a.object_id=CAST(?1 AS TEXT)) "
+      "   OR (a.object_type='instance' AND a.object_id IN "
+      "       (SELECT CAST(id AS TEXT) FROM instances WHERE project_id=?1)) "
+      "   OR (a.object_type='plan_version' AND a.object_id IN "
+      "       (SELECT CAST(id AS TEXT) FROM plan_versions WHERE project_id=?1)) "
+      "ORDER BY a.id DESC LIMIT ?2";
+  Stmt q(db_, kSql);
+  if (!q.ok()) return out;
+  q.Bind(1, project_id);
+  q.Bind(2, limit);
+  while (q.Step()) {
+    AuditEvent e;
+    e.id = q.Int64(0); e.ts = q.Text(1); e.actor_id = q.Int64(2); e.actor_name = q.Text(3);
+    e.action = q.Text(4); e.object_type = q.Text(5); e.object_id = q.Text(6);
+    e.result = q.Text(7); e.correlation_id = q.Text(8); e.detail = q.Text(9);
+    out.push_back(e);
+  }
+  return out;
+}
+
+
+// --- coordinator assignments ------------------------------------------------
+
+bool Store::SetAssignment(long long project_id, long long instance_id,
+                          const std::string& activity_id, long long coordinator_id,
+                          long long assigned_by, std::string* err) {
+  TA_STORE_LOCK();
+  if (activity_id.empty() || activity_id.size() > 64) {
+    *err = "activity id must be 1..64 characters";
+    return false;
+  }
+  // The instance must belong to the project. Without this a caller could attach
+  // an assignment to a project they can see, naming an instance they cannot.
+  {
+    Stmt chk(db_, "SELECT 1 FROM instances WHERE id=? AND project_id=?");
+    if (!chk.ok()) { *err = "cannot verify the instance"; return false; }
+    chk.Bind(1, instance_id);
+    chk.Bind(2, project_id);
+    if (!chk.Step()) { *err = "that instance is not part of this project"; return false; }
+  }
+  if (coordinator_id == 0) {
+    Stmt d(db_, "DELETE FROM activity_assignments "
+                "WHERE project_id=? AND instance_id=? AND activity_id=?");
+    if (!d.ok()) { *err = "cannot clear the assignment"; return false; }
+    d.Bind(1, project_id); d.Bind(2, instance_id); d.Bind(3, activity_id);
+    return d.Done();
+  }
+  {
+    Stmt u(db_, "SELECT disabled FROM users WHERE id=?");
+    if (!u.ok()) { *err = "cannot verify the account"; return false; }
+    u.Bind(1, coordinator_id);
+    if (!u.Step()) { *err = "no such account"; return false; }
+    if (u.Int(0) != 0) { *err = "that account is disabled"; return false; }
+  }
+  Stmt q(db_, "INSERT INTO activity_assignments"
+              "(project_id,instance_id,activity_id,coordinator_id,assigned_by,assigned_at) "
+              "VALUES(?,?,?,?,?,?) "
+              "ON CONFLICT(project_id,instance_id,activity_id) DO UPDATE SET "
+              "coordinator_id=excluded.coordinator_id, assigned_by=excluded.assigned_by, "
+              "assigned_at=excluded.assigned_at");
+  if (!q.ok()) { *err = "cannot store the assignment"; return false; }
+  q.Bind(1, project_id); q.Bind(2, instance_id); q.Bind(3, activity_id);
+  q.Bind(4, coordinator_id); q.Bind(5, assigned_by); q.Bind(6, NowIso());
+  if (!q.Done()) { *err = "cannot store the assignment"; return false; }
+  return true;
+}
+
+std::vector<Assignment> Store::ListAssignments(long long project_id, long long instance_id) {
+  TA_STORE_LOCK();
+  std::vector<Assignment> out;
+  Stmt q(db_, "SELECT a.project_id,a.instance_id,a.activity_id,a.coordinator_id,"
+              "COALESCE(u.username,''),a.assigned_by,a.assigned_at "
+              "FROM activity_assignments a LEFT JOIN users u ON u.id=a.coordinator_id "
+              "WHERE a.project_id=? AND a.instance_id=?");
+  if (!q.ok()) return out;
+  q.Bind(1, project_id);
+  q.Bind(2, instance_id);
+  while (q.Step()) {
+    Assignment a;
+    a.project_id = q.Int64(0); a.instance_id = q.Int64(1); a.activity_id = q.Text(2);
+    a.coordinator_id = q.Int64(3); a.coordinator_name = q.Text(4);
+    a.assigned_by = q.Int64(5); a.assigned_at = q.Text(6);
+    out.push_back(a);
+  }
+  return out;
+}
+
+// --- profile photos ---------------------------------------------------------
+
+bool Store::SetUserPhoto(long long user_id, const std::string& media_type,
+                         const std::string& bytes, std::string* err) {
+  TA_STORE_LOCK();
+  Stmt q(db_, "INSERT INTO user_photos(user_id,media_type,bytes,updated_at) VALUES(?,?,?,?) "
+              "ON CONFLICT(user_id) DO UPDATE SET media_type=excluded.media_type, "
+              "bytes=excluded.bytes, updated_at=excluded.updated_at");
+  if (!q.ok()) { *err = "cannot store the photo"; return false; }
+  q.Bind(1, user_id);
+  q.Bind(2, media_type);
+  q.BindBlob(3, bytes);
+  q.Bind(4, NowIso());
+  if (!q.Done()) { *err = "cannot store the photo"; return false; }
+  return true;
+}
+
+bool Store::ClearUserPhoto(long long user_id) {
+  TA_STORE_LOCK();
+  Stmt q(db_, "DELETE FROM user_photos WHERE user_id=?");
+  if (!q.ok()) return false;
+  q.Bind(1, user_id);
+  return q.Done();
+}
+
+bool Store::HasUserPhoto(long long user_id) {
+  TA_STORE_LOCK();
+  Stmt q(db_, "SELECT 1 FROM user_photos WHERE user_id=?");
+  if (!q.ok()) return false;
+  q.Bind(1, user_id);
+  return q.Step();
+}
+
+bool Store::GetUserPhoto(long long user_id, std::string* media_type, std::string* bytes) {
+  TA_STORE_LOCK();
+  Stmt q(db_, "SELECT media_type,bytes FROM user_photos WHERE user_id=?");
+  if (!q.ok()) return false;
+  q.Bind(1, user_id);
+  if (!q.Step()) return false;
+  *media_type = q.Text(0);
+  *bytes = q.Blob(1);
+  return true;
 }
 
 }  // namespace ta

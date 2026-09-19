@@ -586,6 +586,71 @@ int main() {
     std::error_code ec; fs::remove_all(dir, ec);
   }
 
+  Group("hidden input regression");
+  {
+    const auto dir = CopyInstance("hidden_validation");
+    auto reject = [&](const std::string& file, const std::vector<std::string>& changed,
+                      const std::string& why) {
+      const auto original = ReadLines(dir + "/" + file);
+      WriteLines(dir + "/" + file, changed);
+      Instance bad;
+      std::vector<InputError> errors;
+      Check(!LoadInstance(dir, &bad, &errors) && !errors.empty(), why);
+      WriteLines(dir + "/" + file, original);
+    };
+    reject("01_LINES.csv", {"wrong,line_name", "ALP,Alpha", "BET,Beta"}, "line header is validated");
+    reject("01_LINES.csv", {"line_code,line_name", "ALP,Alpha", "ALP,Duplicate"}, "duplicate lines rejected");
+    reject("01_LINES.csv", {"line_code,line_name", "ALP,Alpha"}, "undeclared network line rejected");
+    reject("06_PARAMETERS.csv", {"key,value", "horizon_start,2027-01-04", "horizon_weeks,52junk"},
+           "horizon trailing garbage rejected");
+    reject("06_PARAMETERS.csv", {"key,value", "horizon_start,2027-01-04", "horizon_weeks,52", "horizon_weeks,26"},
+           "duplicate parameters rejected");
+    auto station_rows = ReadLines(dir + "/02_STATIONS.csv");
+    station_rows.push_back(station_rows[1]);
+    reject("02_STATIONS.csv", station_rows, "duplicate stations rejected");
+    auto sector_rows = ReadLines(dir + "/03_SECTORS.csv");
+    sector_rows[1] = "SEC:ALP:S01_S02,ALP,S01,UNKNOWN,1,0";
+    reject("03_SECTORS.csv", sector_rows, "unknown sector endpoint rejected");
+    auto location_rows = ReadLines(dir + "/04_LOCATION_SUPPLY.csv");
+    const auto where = location_rows[1].find(",ALP,");
+    Check(where != std::string::npos, "fixture has an Alpha location");
+    if (where != std::string::npos) location_rows[1].replace(where, 5, ",BET,");
+    reject("04_LOCATION_SUPPLY.csv", location_rows, "contradictory location metadata rejected");
+    reject("01_LINES.csv", {"line_code,line_code,line_name", "ALP,BET,Alpha"}, "duplicate CSV headers rejected");
+    reject("01_LINES.csv", {"line_code,line_name", "ALP,Alpha,unexpected"}, "extra CSV cells rejected");
+    reject("01_LINES.csv", {"line_code,line_name", "ALP"}, "missing CSV cells rejected");
+    Instance reused;
+    Check(LoadOk(dir, &reused) && LoadOk(dir, &reused), "reloading an instance clears previous state");
+    const auto occupied = reused.activities.front().occupied;
+    const auto pairs = reused.exclusive_pairs;
+    std::vector<InputError> errors;
+    Check(BuildTopology(&reused, &errors) && reused.activities.front().occupied == occupied &&
+          reused.exclusive_pairs == pairs, "rebuilding topology does not duplicate spans or exclusions");
+
+    // Rename all lines and interchange hubs consistently: topology and closure
+    // indexes must remain identical, without depending on public dataset IDs.
+    for (const char* f : kInstanceFiles) {
+      auto rows = ReadLines(dir + "/" + f);
+      for (auto& row : rows)
+        for (const auto& [from, to] : std::vector<std::pair<std::string, std::string>>{
+                 {"ALP", "RED"}, {"BET", "BLUE"}, {"H01", "J01"}, {"H02", "J02"}}) {
+          size_t pos = 0;
+          while ((pos = row.find(from, pos)) != std::string::npos) {
+            row.replace(pos, from.size(), to); pos += to.size();
+          }
+        }
+      WriteLines(dir + "/" + f, rows);
+    }
+    Instance renamed;
+    Check(LoadOk(dir, &renamed), "renamed network loads");
+    bool same = renamed.activities.size() == reused.activities.size();
+    for (size_t i = 0; same && i < renamed.activities.size(); ++i)
+      same = renamed.activities[i].closure == reused.activities[i].closure &&
+             renamed.activities[i].buffer_zone == reused.activities[i].buffer_zone;
+    Check(same, "renamed network preserves every closure and buffer including interchange crossover");
+    std::error_code ec; fs::remove_all(dir, ec);
+  }
+
   // ---------------------------------------------------------------- packing
   Group("slot packing");
   {

@@ -11,7 +11,7 @@
 stages: [build, test, evidence]
 
 default:
-  image: debian:12
+  image: ubuntu:24.04
   before_script:
     - apt-get update -qq
     - apt-get install -y -qq build-essential cmake curl ca-certificates
@@ -100,6 +100,38 @@ public-results:
     paths: [out/ci/]
     expire_in: 1 week
 
-# No coverage threshold is configured. A number would be easy to add and easy to
-# hit without meaning anything; the mutation tests in test_core are the real
-# evidence that the checker checks something. See docs/REQUIREMENTS_MATRIX.md.
+# Browser suite runs against the native service in an isolated temporary store.
+frontend:
+  stage: build
+  image: node:24-bookworm
+  before_script: []
+  cache: []
+  script:
+    - npm ci --prefix client
+    - npm --prefix client run check
+    - npm --prefix client audit --audit-level=moderate
+  artifacts:
+    when: always
+    paths: [client/coverage/, web-dist/]
+    expire_in: 1 week
+
+browser:
+  stage: test
+  image: ubuntu:24.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl ca-certificates libsqlite3-0 libssl3t64 xz-utils
+    - curl -fsSLO https://nodejs.org/dist/v24.14.0/node-v24.14.0-linux-x64.tar.xz
+    - curl -fsSLO https://nodejs.org/dist/v24.14.0/SHASUMS256.txt
+    - sha256sum --check --ignore-missing SHASUMS256.txt
+    - tar -xJf node-v24.14.0-linux-x64.tar.xz -C /usr/local --strip-components=1
+  needs: [build, frontend]
+  script:
+    - npm ci --prefix client
+    - cd client
+    - npx playwright install --with-deps chromium
+    - npm run test:e2e
+  artifacts:
+    when: always
+    paths: [client/test-results/]
+    expire_in: 1 week

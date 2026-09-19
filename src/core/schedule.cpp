@@ -194,6 +194,9 @@ bool ExportPlan(const Instance& inst, const Plan& plan, const std::string& dir, 
     std::ostringstream os;
     os << "{\n  \"strict_buffers\": " << (plan.provenance.strict_buffers ? "true" : "false")
        << ",\n  \"fallback\": " << (plan.provenance.fallback ? "true" : "false")
+       << ",\n  \"reproducible\": " << (plan.provenance.deterministic ? "true" : "false")
+       << ",\n  \"search_workers\": " << plan.provenance.workers
+       << ",\n  \"random_seed\": " << plan.provenance.random_seed
        << ",\n  \"supply_overrides\": [";
     for (size_t i = 0; i < plan.provenance.supply_overrides.size(); ++i) {
       const auto& [loc, wk, sup] = plan.provenance.supply_overrides[i];

@@ -42,7 +42,7 @@ int Usage() {
   std::cerr <<
       "usage:\n"
       "  trackaccess solve    --data DIR --out DIR [--scenario A|B|C|all]\n"
-      "                       [--seconds N] [--workers N] [--seed N] [--log] [--fallback]\n"
+      "                       [--seconds N] [--workers N=1] [--seed N] [--log] [--fallback]\n"
       "                       [--strict-buffers] [--no-zone-overlap]\n"
       "  trackaccess validate --data DIR --submission DIR\n"
       "  trackaccess diagnose --data DIR [--scenario A|B|C] [--seconds N]\n"
@@ -79,9 +79,24 @@ int RunSolve(const std::vector<std::string>& args) {
 
   ta::SolveOptions opts;
   opts.max_seconds = std::stod(Arg(args, "--seconds", "60"));
-  opts.workers = std::stoi(Arg(args, "--workers", "8"));
+  // Reproducibility over speed on the publish path. CP-SAT with several workers
+  // races them against wall-clock time, so two runs of the same instance can
+  // return different optima of identical value - measured on the public
+  // instance as 72 differing rows in scenario C at objective 26.1. A published
+  // artefact whose hash cannot be reproduced is not evidence, so `solve`
+  // defaults to one worker. On the public instance this proves optimality for
+  // all three scenarios in 0.36s total, so the cost is negligible.
+  // `--workers N` above 1 is still allowed, and is recorded as non-reproducible.
+  opts.workers = std::stoi(Arg(args, "--workers", "1"));
   opts.random_seed = std::stoi(Arg(args, "--seed", "1"));
   opts.log_search = Flag(args, "--log");
+  const bool reproducible = (opts.workers == 1);
+  if (!reproducible) {
+    std::cerr << "warning: --workers " << opts.workers
+              << " searches in parallel, so this run is NOT reproducible.\n"
+                 "         Two runs may emit different schedules of equal score.\n"
+                 "         Use --workers 1 for any artefact you publish.\n";
+  }
   const bool fallback = Flag(args, "--fallback");
   opts.strict_buffers = Flag(args, "--strict-buffers");
   opts.no_zone_overlap = Flag(args, "--no-zone-overlap");
@@ -130,6 +145,9 @@ int RunSolve(const std::vector<std::string>& args) {
     }
     res.plan.provenance.strict_buffers = opts.strict_buffers;
     res.plan.provenance.fallback = used_fallback;
+    res.plan.provenance.deterministic = reproducible;
+    res.plan.provenance.workers = opts.workers;
+    res.plan.provenance.random_seed = opts.random_seed;
     res.plan.provenance.solver_detail = res.solver_detail;
     std::string err;
     if (!ta::ExportPlan(inst, res.plan, dir, &err)) {
@@ -479,6 +497,9 @@ int RunRepair(const std::vector<std::string>& args) {
     rep.plan.provenance.supply_overrides.emplace_back(
         inst.locations[o.location].id, o.week, o.supply);
   rep.plan.provenance.strict_buffers = opts.strict_buffers;
+  rep.plan.provenance.deterministic = (opts.workers == 1);
+  rep.plan.provenance.workers = opts.workers;
+  rep.plan.provenance.random_seed = opts.random_seed;
   rep.plan.provenance.solver_detail = rep.solver_detail;
 
   std::error_code ec;

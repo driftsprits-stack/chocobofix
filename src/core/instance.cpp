@@ -1,6 +1,7 @@
 #include "core/instance.h"
 
 #include <algorithm>
+#include <charconv>
 #include <map>
 #include <set>
 #include <sstream>
@@ -141,6 +142,14 @@ bool SplitLocationId(const std::string& id, std::string* kind, std::string* line
 // Rebuilt separately from loading so tests can drive it with synthetic networks.
 bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
   const size_t before = errors->size();
+  inst->exclusive_pairs.clear();
+  inst->exclusive_pairs_strict.clear();
+  inst->exclusive_pairs_no_overlap.clear();
+  for (auto& a : inst->activities) {
+    a.occupied.clear();
+    a.closure.clear();
+    a.buffer_zone.clear();
+  }
 
   // Per (line,bound) alternating chain: PLAT s0, SEC s0_s1, PLAT s1, ...
   // Sector ordinals let the buffer grow by *sectors* (R6) rather than by raw
@@ -211,7 +220,6 @@ bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
     const auto& c = inst->ContractOf(a);
     const BufferRule br = inst->buffers.at(c.nature);
     a.carries_buffer = br.up_to_buffer_sectors > 0;
-    const std::string line = inst->locations[a.occupied.front()].line;
 
     // Step 1: the worksite, plus - for Live - the mirrored opposite bound,
     // because cutting traction power takes both bounds out together.
@@ -259,28 +267,16 @@ bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
       }
     }
 
-    // Step 3: the Live-only interchange crossing. This is an exact set named by
-    // the brief - the other line's H01_H02 tunnel and its H01/H02 platforms -
-    // and is NOT itself grown by the buffer.
+    // Step 3: Live-only interchange crossing, derived from shared hub endpoints.
+    // For the public network this is the other line's H01_H02 tunnel and H01/H02
+    // platforms. The crossover is NOT itself grown by the buffer.
     std::set<LocIdx> cross;
-    if (br.opposite_bound_required) {
-      bool at_interchange = false;
+    if (c.nature == Nature::kLive)
       for (LocIdx l : base) {
-        const std::string& id = inst->locations[l].id;
-        if (id.find("H01_H02") != std::string::npos || id.find(":H01:") != std::string::npos ||
-            id.find(":H02:") != std::string::npos) { at_interchange = true; break; }
+        auto it = inst->interchange_peers.find(l);
+        if (it != inst->interchange_peers.end())
+          cross.insert(it->second.begin(), it->second.end());
       }
-      if (at_interchange) {
-        const std::string other = (line == "ALP") ? "BET" : "ALP";
-        for (const char* bd : {"EB", "WB"})
-          for (const std::string& id : {"SEC:" + other + ":H01_H02:" + bd,
-                                        "PLAT:" + other + ":H01:" + bd,
-                                        "PLAT:" + other + ":H02:" + bd}) {
-            auto it = inst->location_by_id.find(id);
-            if (it != inst->location_by_id.end()) cross.insert(it->second);
-          }
-      }
-    }
     base.insert(cross.begin(), cross.end());
     grown.insert(cross.begin(), cross.end());
     a.closure.assign(base.begin(), base.end());
@@ -346,6 +342,7 @@ bool BuildTopology(Instance* inst, std::vector<InputError>* errors) {
 
 // --- loading ---------------------------------------------------------------
 bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError>* errors) {
+  *inst = Instance{};
   const std::string sep = "/";
   auto path = [&](const char* f) { return dir + sep + f; };
 
@@ -367,7 +364,8 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
     inst->input_hash = Sha256Hex(all);
   }
 
-  CsvTable params, stations, sectors, supply, buffers, projects, activities;
+  CsvTable lines, params, stations, sectors, supply, buffers, projects, activities;
+  if (!CsvTable::Load(path("01_LINES.csv"), {"line_code", "line_name"}, &lines, errors)) return false;
   if (!CsvTable::Load(path("06_PARAMETERS.csv"), {"key", "value"}, &params, errors)) return false;
   if (!CsvTable::Load(path("02_STATIONS.csv"),
                       {"station_id", "line_code", "seq", "is_interchange"}, &stations, errors)) return false;
@@ -393,15 +391,24 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
   // --- parameters ---
   {
     std::map<std::string, std::string> kv;
-    for (int r = 0; r < params.RowCount(); ++r)
-      kv[params.Str(r, "key", errors)] = params.Str(r, "value", errors);
+    for (int r = 0; r < params.RowCount(); ++r) {
+      const auto key = params.Str(r, "key", errors);
+      if (!kv.emplace(key, params.Str(r, "value", errors)).second)
+        params.AddError(r + 2, "key", "duplicate parameter", errors);
+    }
     auto hs = kv.count("horizon_start") ? Date::Parse(kv["horizon_start"]) : std::nullopt;
     if (!hs) { errors->push_back({"06_PARAMETERS.csv", 0, "horizon_start",
                                   "missing or not a YYYY-MM-DD date"}); return false; }
     inst->horizon_start = *hs;
-    try { inst->horizon_weeks = std::stoi(kv.at("horizon_weeks")); }
-    catch (...) { errors->push_back({"06_PARAMETERS.csv", 0, "horizon_weeks",
-                                     "missing or not an integer"}); return false; }
+    const auto value = kv.find("horizon_weeks");
+    if (value == kv.end()) {
+      errors->push_back({"06_PARAMETERS.csv", 0, "horizon_weeks", "missing integer"}); return false;
+    }
+    const auto& text = value->second;
+    const auto [end, ec] = std::from_chars(text.data(), text.data() + text.size(), inst->horizon_weeks);
+    if (ec != std::errc{} || end != text.data() + text.size()) {
+      errors->push_back({"06_PARAMETERS.csv", 0, "horizon_weeks", "expected a whole integer"}); return false;
+    }
     if (inst->horizon_weeks < 1 || inst->horizon_weeks > 520) {
       errors->push_back({"06_PARAMETERS.csv", 0, "horizon_weeks",
                          "outside the supported range 1..520"});
@@ -422,14 +429,44 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
                          std::string("no buffer row for \"") + std::string(ToString(n)) + "\""});
 
   // --- network ordering, used to place locations on their chain ---
+  std::set<std::string> line_codes;
+  for (int r = 0; r < lines.RowCount(); ++r) {
+    const auto code = lines.Str(r, "line_code", errors);
+    lines.Str(r, "line_name", errors);
+    if (!line_codes.insert(code).second)
+      lines.AddError(r + 2, "line_code", "duplicate line code", errors);
+  }
+  if (line_codes.empty()) lines.AddError(0, "line_code", "at least one line is required", errors);
   std::map<std::pair<std::string, std::string>, int> station_seq;   // (line,station)->seq
-  for (int r = 0; r < stations.RowCount(); ++r)
-    station_seq[{stations.Str(r, "line_code", errors), stations.Str(r, "station_id", errors)}] =
-        stations.Int(r, "seq", errors, 1, 100000);
+  std::set<std::pair<std::string, std::string>> hubs;
+  std::set<std::pair<std::string, int>> positions;
+  for (int r = 0; r < stations.RowCount(); ++r) {
+    const auto line = stations.Str(r, "line_code", errors);
+    const auto id = stations.Str(r, "station_id", errors);
+    const int seq = stations.Int(r, "seq", errors, 1, 100000);
+    if (!line_codes.count(line)) stations.AddError(r + 2, "line_code", "unknown line", errors);
+    if (!station_seq.emplace(std::make_pair(line, id), seq).second)
+      stations.AddError(r + 2, "station_id", "duplicate station on line", errors);
+    if (!positions.emplace(line, seq).second)
+      stations.AddError(r + 2, "seq", "duplicate station position on line", errors);
+    if (stations.Int(r, "is_interchange", errors, 0, 1)) hubs.emplace(line, id);
+  }
   std::map<std::string, std::pair<std::string, std::string>> sector_ends;  // sector_id -> (from,to)
-  for (int r = 0; r < sectors.RowCount(); ++r)
-    sector_ends[sectors.Str(r, "sector_id", errors)] =
-        {sectors.Str(r, "from_station_id", errors), sectors.Str(r, "to_station_id", errors)};
+  std::map<std::pair<std::string, std::string>, std::map<std::string, std::string>> hub_sectors;
+  for (int r = 0; r < sectors.RowCount(); ++r) {
+    const auto id = sectors.Str(r, "sector_id", errors);
+    const auto line = sectors.Str(r, "line_code", errors);
+    const auto from = sectors.Str(r, "from_station_id", errors);
+    const auto to = sectors.Str(r, "to_station_id", errors);
+    if (!line_codes.count(line) || !station_seq.count({line, from}) || !station_seq.count({line, to}))
+      sectors.AddError(r + 2, "sector_id", "unknown line or endpoint station", errors);
+    if (!sector_ends.emplace(id, std::make_pair(from, to)).second)
+      sectors.AddError(r + 2, "sector_id", "duplicate sector", errors);
+    if (id != "SEC:" + line + ":" + from + "_" + to)
+      sectors.AddError(r + 2, "sector_id", "sector ID disagrees with line or endpoints", errors);
+    if (hubs.count({line, from}) && hubs.count({line, to}))
+      hub_sectors[std::minmax(from, to)][line] = id;
+  }
 
   // --- locations ---
   for (int r = 0; r < supply.RowCount(); ++r) {
@@ -450,6 +487,11 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
     std::string k2, l2, body, bd2;
     if (!SplitLocationId(L.id, &k2, &l2, &body, &bd2)) {
       supply.AddError(r + 2, "location_id", "malformed location id", errors); continue;
+    }
+    if (!line_codes.count(L.line) || l2 != L.line || bd2 != bd ||
+        (k2 == "SEC") != (L.kind == LocationKind::kTunnelSector)) {
+      supply.AddError(r + 2, "location_id", "location ID disagrees with kind, line or bound", errors);
+      continue;
     }
     if (L.kind == LocationKind::kPlatformSector) {
       auto it = station_seq.find({L.line, body});
@@ -477,6 +519,28 @@ bool LoadInstance(const std::string& dir, Instance* inst, std::vector<InputError
     }
     inst->location_by_id[L.id] = static_cast<LocIdx>(inst->locations.size());
     inst->locations.push_back(std::move(L));
+  }
+
+  // A tunnel connecting the same two declared interchange hubs on multiple
+  // lines forms a crossover. Map its tunnel/platform locations across lines.
+  for (const auto& [ends, by_line] : hub_sectors) {
+    for (const auto& [line, sector] : by_line) {
+      for (const auto& [other, peer_sector] : by_line) {
+        if (line == other) continue;
+        for (const char* bound : {"EB", "WB"})
+          for (const auto& source : {sector + ":" + bound, "PLAT:" + line + ":" + ends.first + ":" + bound,
+                                    "PLAT:" + line + ":" + ends.second + ":" + bound}) {
+            auto src = inst->location_by_id.find(source);
+            if (src == inst->location_by_id.end()) continue;
+            for (const char* pb : {"EB", "WB"})
+              for (const auto& target : {peer_sector + ":" + pb, "PLAT:" + other + ":" + ends.first + ":" + pb,
+                                        "PLAT:" + other + ":" + ends.second + ":" + pb}) {
+                auto dst = inst->location_by_id.find(target);
+                if (dst != inst->location_by_id.end()) inst->interchange_peers[src->second].push_back(dst->second);
+              }
+          }
+      }
+    }
   }
 
   // --- contracts ---

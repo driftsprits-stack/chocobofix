@@ -1,14 +1,28 @@
-# Container image for TrackAccess.
+# Container image for ChocoboFix.
 #
-# NOT BUILT OR RUN. No container runtime was available on the development
-# machine, so this file is written from the same steps that were executed by
-# hand on macOS and is UNVERIFIED on Linux. Build it once before relying on it;
-# docs/DEPLOYMENT.md records this as an open item.
+# Base image note: scripts/fetch_deps.sh selects the OR-Tools binary by
+# `uname -s`/`uname -m`, and for Linux/x86_64 that is the **Ubuntu 24.04** build.
+# OR-Tools publishes no Debian binaries. An earlier version of this file built on
+# debian:12-slim, whose glibc (2.36) is older than the one those binaries are
+# linked against (2.39), so the image could not work. The base is therefore
+# Ubuntu 24.04, matching the pinned binary exactly. If you move to another base,
+# change fetch_deps.sh in the same commit or pass -DORTOOLS_ROOT.
 #
-#   docker build -f deploy/Dockerfile -t trackaccess .
-#   docker run -p 8080:8080 -v trackaccess-data:/var/lib/trackaccess trackaccess
+#   docker build -f deploy/Dockerfile -t chocobofix .
+#   docker run -p 8080:8080 -v chocobofix-data:/var/lib/trackaccess chocobofix
 
-FROM debian:12-slim AS build
+# --- stage 1: the React client --------------------------------------------
+FROM node:22-slim AS client
+WORKDIR /client
+COPY client/package.json client/package-lock.json* ./
+RUN npm ci --no-audit --no-fund
+COPY client/ ./
+# Vite writes to ../web-dist, which is /web-dist from this working directory.
+RUN npm run build
+
+# --- stage 2: the native service ------------------------------------------
+FROM ubuntu:24.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake curl ca-certificates \
         libsqlite3-dev libssl-dev \
@@ -21,15 +35,19 @@ RUN ./scripts/fetch_deps.sh \
 # Refuse to produce an image whose own checks do not pass.
 RUN ./build/test_core && ./build/check_sample
 
-FROM debian:12-slim
+# --- stage 3: runtime ------------------------------------------------------
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsqlite3-0 libssl3 ca-certificates \
+        libsqlite3-0 libssl3t64 ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --home /var/lib/trackaccess --create-home trackaccess
-WORKDIR /opt/trackaccess
+WORKDIR /opt/chocobofix
 COPY --from=build /src/build/trackaccess /src/build/trackaccess-service ./build/
 COPY --from=build /src/third_party/or-tools_* ./third_party/
-COPY --from=build /src/web ./web
+# The React build is the interface that ships. web/ is the superseded frontend
+# and is deliberately not copied; see docs/FRONTEND_MIGRATION.md.
+COPY --from=client /web-dist ./web
 COPY --from=build /src/data/upstream/PS1/01_data ./data/public
 USER trackaccess
 VOLUME ["/var/lib/trackaccess"]

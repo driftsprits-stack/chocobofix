@@ -37,6 +37,13 @@ def main(D, S):
         return ch
     CH = {(l, b): chain(l, b) for l in order for b in ('EB', 'WB')}
     IDX = {k: {loc: i for i, loc in enumerate(v)} for k, v in CH.items()}
+    hubs = {(r['line_code'], r['station_id']) for r in rd(D+'02_STATIONS.csv')
+            if r['is_interchange'] == '1'}
+    crossings = collections.defaultdict(dict)
+    for r in rd(D+'03_SECTORS.csv'):
+        ln, first, last = r['line_code'], r['from_station_id'], r['to_station_id']
+        if (ln, first) in hubs and (ln, last) in hubs:
+            crossings[tuple(sorted((first, last)))][ln] = r['sector_id']
     nature = lambda a: cons[acts[a]['contract_number']]['nature_of_activity']
     atype  = lambda a: cons[acts[a]['contract_number']]['access_type']
 
@@ -85,10 +92,17 @@ def main(D, S):
                         need -= 1
                         if need == 0: break
         cross = set()
-        if mirror and any('H01_H02' in l or ':H01:' in l or ':H02:' in l for l in base):
-            o = 'BET' if line == 'ALP' else 'ALP'
-            for b in ('EB', 'WB'):
-                cross |= {f'SEC:{o}:H01_H02:{b}', f'PLAT:{o}:H01:{b}', f'PLAT:{o}:H02:{b}'}
+        if nature(a) == 'Live':
+            for (first, last), peers in crossings.items():
+                if line not in peers: continue
+                own = {loc for b in ('EB', 'WB') for loc in
+                       (f'{peers[line]}:{b}', f'PLAT:{line}:{first}:{b}', f'PLAT:{line}:{last}:{b}')}
+                if not own.intersection(base): continue
+                for other, sector in peers.items():
+                    if other == line: continue
+                    cross |= {loc for b in ('EB', 'WB') for loc in
+                              (f'{sector}:{b}', f'PLAT:{other}:{first}:{b}', f'PLAT:{other}:{last}:{b}')
+                              if loc in sup}
         return base | cross, grown | cross
 
     has_buffer = lambda a: bufcfg[nature(a)][0] > 0

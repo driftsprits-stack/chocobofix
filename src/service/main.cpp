@@ -30,6 +30,7 @@
 #include "httplib.h"
 #include "service/crypto.h"
 #include "service/store.h"
+#include "service/crypto.h"
 #include "validator/validator.h"
 
 namespace fs = std::filesystem;
@@ -106,13 +107,7 @@ std::string NowIso() {
 }
 
 std::string RandomId(size_t n = 16) {
-  static std::mt19937_64 rng(std::random_device{}());
-  static std::mutex mu;
-  static const char* kAlpha = "abcdefghijklmnopqrstuvwxyz0123456789";
-  std::lock_guard<std::mutex> lk(mu);
-  std::string s;
-  for (size_t i = 0; i < n; ++i) s.push_back(kAlpha[rng() % 36]);
-  return s;
+  return ta::RandomToken((n + 1) / 2).substr(0, n);
 }
 
 // Ids come back from clients in paths. Only our own alphabet is ever accepted,
@@ -500,6 +495,7 @@ std::string UserJson(const User& u) {
      << "," << Q("role") << ":" << Q(std::string(ToString(u.role)))
      << "," << Q("disabled") << ":" << (u.disabled ? "true" : "false")
      << "," << Q("created_at") << ":" << Q(u.created_at)
+     << "," << Q("photo") << ":" << (g_store.HasUserPhoto(u.id) ? "true" : "false")
      << "," << Q("can") << ":{"
      << Q("create_project") << ":" << (RoleHas(u.role, Cap::kCreateProject) ? "true" : "false") << ","
      << Q("run_solve") << ":" << (RoleHas(u.role, Cap::kRunSolve) ? "true" : "false") << ","
@@ -681,13 +677,61 @@ int main(int argc, char** argv) {
   // A browser page from any other origin must not be able to drive this service.
   // No CORS headers are emitted at all, so cross-origin reads are refused by the
   // browser; same-origin UI is unaffected.
-  srv.set_post_routing_handler([](const httplib::Request&, httplib::Response& res) {
+  srv.set_post_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+    if (req.path.rfind("/api/", 0) == 0) {
+      res.set_header("Cache-Control", "no-store, private");
+      res.set_header("Pragma", "no-cache");
+      res.set_header("Vary", "Authorization");
+    }
+    res.set_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     res.set_header("X-Content-Type-Options", "nosniff");
     res.set_header("X-Frame-Options", "DENY");
     res.set_header("Referrer-Policy", "no-referrer");
     res.set_header("Content-Security-Policy",
-                   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
-                   "script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'");
+                   "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; "
+                   "script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
+  });
+
+  // Reject browser-origin writes from other sites, including login/bootstrap.
+  // No forwarded headers are trusted here; a proxy must preserve the Host.
+  srv.set_pre_routing_handler([](const httplib::Request& req, httplib::Response& res) {
+    using Result = httplib::Server::HandlerResponse;
+    if (req.path.rfind("/api/", 0) != 0) return Result::Unhandled;
+    if (req.method != "GET" && req.method != "HEAD" && req.method != "OPTIONS") {
+      const auto origin = req.get_header_value("Origin");
+      const auto host = req.get_header_value("Host");
+      if (req.get_header_value("Sec-Fetch-Site") == "cross-site" ||
+          (!origin.empty() && origin != "http://" + host && origin != "https://" + host)) {
+        Deny(res, 403, "cross-origin changes are not permitted");
+        return Result::Handled;
+      }
+    }
+    // Single-service, bounded per-IP budget. A distributed edge limiter is
+    // still required for a multi-instance deployment. Do not trust X-Forwarded-For.
+    if (req.method == "POST") {
+      struct Bucket { std::chrono::steady_clock::time_point start; int count; };
+      static std::mutex rate_mutex;
+      static std::unordered_map<std::string, Bucket> buckets;
+      const auto now = std::chrono::steady_clock::now();
+      const bool auth = req.path == "/api/v1/auth/login" || req.path == "/api/v1/bootstrap";
+      const auto key = req.remote_addr + (auth ? ":auth" : ":write");
+      std::lock_guard<std::mutex> lock(rate_mutex);
+      for (auto it = buckets.begin(); it != buckets.end();) {
+        if (now - it->second.start >= std::chrono::minutes(1)) it = buckets.erase(it);
+        else ++it;
+      }
+      if (buckets.size() >= 10000 && !buckets.count(key)) {
+        res.set_header("Retry-After", "60"); Deny(res, 429, "service is busy; try again later"); return Result::Handled;
+      }
+      auto [it, inserted] = buckets.try_emplace(key, Bucket{now, 0});
+      if (++it->second.count > (auth ? 60 : 180)) {
+        res.set_header("Retry-After", "60"); Deny(res, 429, "request limit reached; wait one minute"); return Result::Handled;
+      }
+    }
+    return Result::Unhandled;
+  });
+  srv.set_exception_handler([](const httplib::Request&, httplib::Response& res, std::exception_ptr) {
+    Deny(res, 500, "the service could not complete the request");
   });
 
   // ---------------------------------------------------------------- health
@@ -706,6 +750,8 @@ int main(int argc, char** argv) {
   // First-run only: creates the initial administrator. Refused once any account
   // exists, so it cannot be used to mint a second one later.
   srv.Post("/api/v1/bootstrap", [](const httplib::Request& req, httplib::Response& res) {
+    static std::mutex bootstrap_mutex;
+    std::lock_guard<std::mutex> bootstrap_lock(bootstrap_mutex);
     if (g_store.UserCount() != 0) return Deny(res, 409, "this deployment is already set up");
     const std::string user = req.get_param_value("username");
     const std::string pass = req.get_param_value("password");
@@ -721,6 +767,7 @@ int main(int argc, char** argv) {
     const std::string user = req.get_param_value("username");
     const std::string pass = req.get_param_value("password");
     if (user.empty() || pass.empty()) return Deny(res, 400, "username and password are required");
+    if (user.size() > 64 || pass.size() > 1024) return Deny(res, 400, "credentials exceed the size limit");
     if (LoginThrottled(user)) {
       g_store.Audit(0, "auth.login", "user", user, "throttled", CorrelationId(req), "");
       return Deny(res, 429, "too many failed attempts; wait a few minutes and try again");
@@ -819,21 +866,45 @@ int main(int argc, char** argv) {
   srv.Get("/api/v1/projects", [](const httplib::Request& req, httplib::Response& res) {
     auto me = CurrentUser(req);
     if (!me) return Deny(res, 401, "sign in to continue");
+    long long before = 0;
+    int limit = 50;
+    try {
+      if (req.has_param("before")) {
+        const auto value = req.get_param_value("before");
+        if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) return Deny(res,400,"invalid cursor");
+        before = std::stoll(value);
+      }
+      if (req.has_param("limit")) {
+        const auto value = req.get_param_value("limit");
+        if (value.empty() || value.find_first_not_of("0123456789") != std::string::npos) return Deny(res,400,"invalid limit");
+        limit = std::stoi(value);
+        if (limit < 1 || limit > 100) return Deny(res,400,"limit must be 1..100");
+      }
+    } catch (...) { return Deny(res,400,"invalid pagination"); }
+    auto rows = g_store.ListVisibleProjects(*me, before, limit + 1);
+    const bool more = rows.size() > static_cast<size_t>(limit);
+    if (more) rows.resize(limit);
     std::ostringstream os;
-    os << "{" << Q("projects") << ":[";
+    os << "{\"projects\":[";
     bool first = true;
-    for (const auto& p : g_store.ListProjects()) {
-      if (!CanViewProject(*me, p)) continue;    // dataset protection
-      auto owner = g_store.UserById(p.owner_id);
+    for (const auto& p : rows) {
       os << (first ? "" : ",") << "{" << Q("id") << ":" << p.id
          << "," << Q("name") << ":" << Q(p.name)
-         << "," << Q("owner") << ":" << Q(owner ? owner->username : "")
+         << "," << Q("owner") << ":" << Q(p.owner_name)
          << "," << Q("revision") << ":" << p.revision
          << "," << Q("created_at") << ":" << Q(p.created_at) << "}";
       first = false;
     }
-    os << "]}";
+    os << "],\"next_cursor\":" << (more ? std::to_string(rows.back().id) : "null") << "}";
     res.set_content(os.str(), "application/json");
+  });
+  srv.Get(R"(/api/v1/projects/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = CurrentUser(req);
+    if (!me) return Deny(res,401,"sign in to continue");
+    auto p = RequireProject(req,res,*me,std::stoll(req.matches[1]));
+    if (!p) return;
+    res.set_content("{\"id\":" + std::to_string(p->id) + ",\"name\":" + Q(p->name) +
+      ",\"revision\":" + std::to_string(p->revision) + "}", "application/json");
   });
 
   srv.Post("/api/v1/projects", [](const httplib::Request& req, httplib::Response& res) {
@@ -1096,7 +1167,12 @@ int main(int argc, char** argv) {
       if (job->pid > 0) ::kill(job->pid, SIGTERM);
       if (job->state == "queued") { job->state = "cancelled"; job->finished_at = NowIso(); }
     }
-    g_store.Audit(me->id, "job.cancel", "job", job->id, "ok", CorrelationId(req), "");
+    // Logged against the project, not the job: job ids are in-memory and random,
+    // so a "job"-typed row could never be attributed to a project after a
+    // restart and would be dropped from the project's audit view. The job id is
+    // kept in the detail field.
+    g_store.Audit(me->id, "job.cancel", "project", std::to_string(job->project_id), "ok",
+                  CorrelationId(req), "job " + job->id);
     std::lock_guard<std::mutex> lk(g_mu);
     res.set_content(JobJson(*job), "application/json");
   });
@@ -1212,6 +1288,32 @@ int main(int argc, char** argv) {
     if (!proj) return;
     std::ostringstream os;
     os << "{" << Q("events") << ":[";
+    const auto ev = g_store.ListProjectAudit(proj->id, 300);
+    bool first = true;
+    for (const auto& e : ev) {
+      os << (first ? "" : ",") << "{" << Q("ts") << ":" << Q(e.ts)
+         << "," << Q("actor") << ":" << Q(e.actor_name)
+         << "," << Q("action") << ":" << Q(e.action)
+         << "," << Q("object") << ":" << Q(e.object_type + " " + e.object_id)
+         << "," << Q("result") << ":" << Q(e.result)
+         << "," << Q("correlation_id") << ":" << Q(e.correlation_id)
+         << "," << Q("detail") << ":" << Q(e.detail) << "}";
+      first = false;
+    }
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  // Installation-wide audit, including account events that belong to no project.
+  // Separate endpoint, separate authorisation: kViewAudit alone is not enough,
+  // because an approver holds it and must still only see their projects.
+  srv.Get("/api/v1/audit", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kViewAudit);
+    if (!me) return;
+    if (me->role != Role::kAdministrator)
+      return Deny(res, 403, "installation audit needs the administrator role");
+    std::ostringstream os;
+    os << "{" << Q("events") << ":[";
     const auto ev = g_store.ListAudit(300, "", "");
     bool first = true;
     for (const auto& e : ev) {
@@ -1226,6 +1328,160 @@ int main(int argc, char** argv) {
     }
     os << "]}";
     res.set_content(os.str(), "application/json");
+  });
+
+  // ------------------------------------------------- coordinator assignments
+  // Communication metadata. The solver never reads it, and it is kept out of
+  // the eight input CSVs and the three export CSVs entirely.
+
+  srv.Get(R"(/api/v1/projects/(\d+)/assignments)",
+          [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kViewProject);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+    long long iid = 0;
+    try { iid = std::stoll(req.get_param_value("instance_id")); } catch (...) {}
+    if (iid <= 0) return Deny(res, 400, "instance_id is required");
+    // The instance must be this project's, or a caller could read another
+    // project's assignments through a project they can see.
+    auto rec = g_store.InstanceById(iid);
+    if (!rec || rec->project_id != proj->id) return Deny(res, 404, "unknown instance");
+
+    std::ostringstream os;
+    os << "{" << Q("assignments") << ":[";
+    bool first = true;
+    for (const auto& a : g_store.ListAssignments(proj->id, iid)) {
+      os << (first ? "" : ",") << "{" << Q("activity_id") << ":" << Q(a.activity_id)
+         << "," << Q("coordinator_id") << ":" << a.coordinator_id
+         << "," << Q("coordinator") << ":" << Q(a.coordinator_name)
+         << "," << Q("coordinator_photo") << ":"
+         << (a.coordinator_id && g_store.HasUserPhoto(a.coordinator_id) ? "true" : "false")
+         << "," << Q("assigned_at") << ":" << Q(a.assigned_at) << "}";
+      first = false;
+    }
+    os << "]}";
+    res.set_content(os.str(), "application/json");
+  });
+
+  srv.Post(R"(/api/v1/projects/(\d+)/assignments)",
+           [](const httplib::Request& req, httplib::Response& res) {
+    // Assigning is a planning action, so it needs the capability that plans the
+    // work - a viewer may read an assignment but never set one.
+    auto me = Require(req, res, Cap::kUploadInstance);
+    if (!me) return;
+    auto proj = RequireProject(req, res, *me, std::stoll(req.matches[1]));
+    if (!proj) return;
+
+    long long iid = 0, coord = 0;
+    try { iid = std::stoll(req.get_param_value("instance_id")); } catch (...) {}
+    const std::string activity = req.get_param_value("activity_id");
+    const std::string coord_raw = req.get_param_value("coordinator_id");
+    // An empty coordinator clears the assignment; the activity then reads as
+    // "Unassigned" rather than quietly inheriting whoever uploaded the files.
+    if (!coord_raw.empty()) { try { coord = std::stoll(coord_raw); } catch (...) { coord = -1; } }
+    if (iid <= 0) return Deny(res, 400, "instance_id is required");
+    if (activity.empty()) return Deny(res, 400, "activity_id is required");
+    if (coord < 0) return Deny(res, 400, "coordinator_id must be a number, or empty to clear");
+
+    auto rec = g_store.InstanceById(iid);
+    if (!rec || rec->project_id != proj->id) return Deny(res, 404, "unknown instance");
+
+    std::string err;
+    if (!g_store.SetAssignment(proj->id, iid, activity, coord, me->id, &err))
+      return Deny(res, 400, err);
+
+    // Recorded against the project, so it appears in that project's trail and
+    // nowhere else.
+    g_store.Audit(me->id, coord ? "activity.assign" : "activity.unassign", "project",
+                  std::to_string(proj->id), "ok", CorrelationId(req),
+                  "instance " + std::to_string(iid) + " activity " + activity);
+    res.set_content("{" + Q("ok") + ":true}", "application/json");
+  });
+
+  // ------------------------------------------------------------ profile photo
+
+  srv.Get(R"(/api/v1/users/(\d+)/photo)", [](const httplib::Request& req, httplib::Response& res) {
+    // Any signed-in user may see a colleague's avatar; it is shown beside their
+    // name throughout the workspace.
+    auto me = Require(req, res, Cap::kViewProject);
+    if (!me) return;
+    std::string type, bytes;
+    if (!g_store.GetUserPhoto(std::stoll(req.matches[1]), &type, &bytes))
+      return Deny(res, 404, "no photo");
+    // nosniff is already set globally; the type here is one we verified on the
+    // way in, never one the client asserted.
+    res.set_header("Cache-Control", "private, max-age=60");
+    res.set_content(bytes, type.c_str());
+  });
+
+  srv.Post("/api/v1/profile/photo", [](const httplib::Request& req, httplib::Response& res) {
+    auto me = Require(req, res, Cap::kViewProject);
+    if (!me) return;
+
+    auto it = req.files.find("photo");
+    if (it == req.files.end()) {
+      // No file part means "remove my photo".
+      g_store.ClearUserPhoto(me->id);
+      g_store.Audit(me->id, "profile.photo.clear", "user", std::to_string(me->id), "ok",
+                    CorrelationId(req), "");
+      return res.set_content("{" + Q("ok") + ":true," + Q("photo") + ":false}", "application/json");
+    }
+    const std::string& body = it->second.content;
+
+    // Size cap first: everything below reads the buffer.
+    if (body.size() > 512u * 1024u)
+      return Deny(res, 413, "the photo must be 512 kB or smaller");
+    if (body.size() < 16) return Deny(res, 400, "that file is not an image");
+
+    // The media type is decided by the bytes, never by the client's header or
+    // the filename. SVG is refused outright: it is a document that can carry
+    // script, not a raster image.
+    auto starts = [&](const char* sig, size_t n) { return body.compare(0, n, sig, n) == 0; };
+    std::string type;
+    int w = 0, h = 0;
+    if (starts("\x89PNG\r\n\x1a\n", 8)) {
+      type = "image/png";
+      // IHDR width/height are big-endian at bytes 16..23 of a valid PNG.
+      auto be32 = [&](size_t o) {
+        return (static_cast<unsigned char>(body[o]) << 24) |
+               (static_cast<unsigned char>(body[o + 1]) << 16) |
+               (static_cast<unsigned char>(body[o + 2]) << 8) |
+               (static_cast<unsigned char>(body[o + 3]));
+      };
+      if (body.size() < 24 || body.compare(12, 4, "IHDR") != 0)
+        return Deny(res, 400, "that PNG file is not readable");
+      w = be32(16); h = be32(20);
+    } else if (starts("\xff\xd8\xff", 3)) {
+      type = "image/jpeg";
+      // Walk the segment chain to the frame header for the real dimensions.
+      size_t i = 2;
+      while (i + 9 < body.size()) {
+        if (static_cast<unsigned char>(body[i]) != 0xFF) break;
+        const unsigned char marker = static_cast<unsigned char>(body[i + 1]);
+        const size_t len = (static_cast<unsigned char>(body[i + 2]) << 8) |
+                            static_cast<unsigned char>(body[i + 3]);
+        if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC) {
+          h = (static_cast<unsigned char>(body[i + 5]) << 8) | static_cast<unsigned char>(body[i + 6]);
+          w = (static_cast<unsigned char>(body[i + 7]) << 8) | static_cast<unsigned char>(body[i + 8]);
+          break;
+        }
+        if (len < 2) break;
+        i += 2 + len;
+      }
+      if (w == 0 || h == 0) return Deny(res, 400, "that JPEG file is not readable");
+    } else {
+      return Deny(res, 415, "use a PNG or JPEG image");
+    }
+
+    if (w <= 0 || h <= 0 || w > 2048 || h > 2048)
+      return Deny(res, 400, "the photo must be 2048 by 2048 pixels or smaller");
+
+    std::string err;
+    if (!g_store.SetUserPhoto(me->id, type, body, &err)) return Deny(res, 500, err);
+    g_store.Audit(me->id, "profile.photo.set", "user", std::to_string(me->id), "ok",
+                  CorrelationId(req), type);
+    res.set_content("{" + Q("ok") + ":true," + Q("photo") + ":true}", "application/json");
   });
 
   // ------------------------------------------------- explain / repair
@@ -1311,6 +1567,35 @@ int main(int argc, char** argv) {
   });
 
   srv.set_mount_point("/", g_cfg.web);
+
+  // Single-page fallback.
+  //
+  // The React client owns its routes, so opening or refreshing /workspace sends
+  // a request the service has no file for. That navigation must get the app
+  // shell. Three things it must NOT do:
+  //   - answer an unknown /api path with HTML. An API path stays an API path;
+  //     returning a page there turns a 404 into a JSON parse error at the caller.
+  //   - answer a missing asset (anything with a dot in the last segment) with
+  //     HTML, which would mask a broken script tag as a blank page.
+  //   - overwrite a response a handler already wrote. Only a genuinely unmatched
+  //     request has an empty body at this point.
+  srv.set_error_handler([](const httplib::Request& req, httplib::Response& res) {
+    if (res.status != 404 || !res.body.empty()) return;
+    if (req.path.rfind("/api/", 0) == 0) {
+      res.set_content("{\"error\":\"no such endpoint\"}", "application/json");
+      return;
+    }
+    if (req.method != "GET") return;
+    const auto slash = req.path.find_last_of('/');
+    const auto last = slash == std::string::npos ? req.path : req.path.substr(slash + 1);
+    if (last.find('.') != std::string::npos) return;   // a missing file, not a route
+    std::ifstream f(g_cfg.web + "/index.html", std::ios::binary);
+    if (!f) return;
+    std::ostringstream ss;
+    ss << f.rdbuf();
+    res.status = 200;
+    res.set_content(ss.str(), "text/html");
+  });
 
   std::vector<std::thread> pool;
   for (int i = 0; i < g_cfg.max_concurrent_solves; ++i) pool.emplace_back(WorkerLoop);

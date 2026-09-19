@@ -158,6 +158,7 @@ void CsvTable::AddError(int row, const std::string& col, std::string message,
 
 bool CsvTable::Load(const std::string& path, const std::vector<std::string>& required_columns,
                     CsvTable* out, std::vector<InputError>* errors) {
+  *out = CsvTable{};
   std::string raw;
   if (!ReadFile(path, &raw)) {
     if (errors) errors->push_back(InputError{path, 0, "", "file could not be read"});
@@ -181,7 +182,13 @@ bool CsvTable::Load(const std::string& path, const std::vector<std::string>& req
     return false;
   }
   const auto header = SplitRecord(lines[0]);
-  for (size_t i = 0; i < header.size(); ++i) out->col_index_[Trim(header[i])] = static_cast<int>(i);
+  for (size_t i = 0; i < header.size(); ++i) {
+    const auto name = Trim(header[i]);
+    if (name.empty() || !out->col_index_.emplace(name, static_cast<int>(i)).second) {
+      out->AddError(1, name, "empty or duplicate column name", errors);
+      return false;
+    }
+  }
 
   bool ok = true;
   for (const auto& c : required_columns) {
@@ -200,6 +207,10 @@ bool CsvTable::Load(const std::string& path, const std::vector<std::string>& req
       return false;
     }
     auto cells = SplitRecord(lines[i]);
+    if (cells.size() != header.size()) {
+      out->AddError(static_cast<int>(i + 1), "", "row column count differs from header", errors);
+      return false;
+    }
     cells.resize(header.size());
     for (auto& c : cells) c = Trim(std::move(c));
     out->rows_.push_back(std::move(cells));

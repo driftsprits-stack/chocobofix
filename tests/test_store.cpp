@@ -271,6 +271,22 @@ int main() {
     Eq(none.size(), size_t(0), "an object with no events returns none");
   }
 
+  Group("project pagination");
+  {
+    Project extra;
+    Check(s.CreateProject("Second project", planner.id, &extra, &err), "second project created");
+    auto first = s.ListVisibleProjects(planner, 0, 1);
+    Eq(first.size(), size_t(1), "page is bounded");
+    Eq(first[0].id, extra.id, "newest project first");
+    Eq(first[0].owner_name, planner.username, "owner comes from joined query");
+    auto next = s.ListVisibleProjects(planner, first[0].id, 1);
+    Eq(next.size(), size_t(1), "cursor reaches older project");
+    Eq(next[0].id, proj.id, "cursor does not repeat boundary row");
+    User outsider; outsider.id = 987654; outsider.role = Role::kPlanner;
+    Check(s.ListVisibleProjects(outsider, 0, 100).empty(), "other planner cannot list projects");
+    Check(s.ListVisibleProjects(approver, 0, 100).size() >= 2, "approver can review both projects");
+  }
+
   // ---------------------------------------------------------------- tokens
   Group("tokens");
   {

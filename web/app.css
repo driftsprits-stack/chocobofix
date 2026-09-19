@@ -334,3 +334,13 @@ details.tech > summary:focus-visible { box-shadow: var(--focus); }
   .btn, .nav button, .stage { transition: background-color .12s ease, color .12s ease, border-color .12s ease; }
 }
 @media print { .topbar, .nav, .btn { display: none !important; } }
+
+/* Field-level validation messages. Never colour alone: the message is words,
+   and the input also carries aria-invalid for assistive technology. */
+.field-err {
+  margin: 4px 0 0;
+  color: var(--bad);
+  min-height: 0;
+}
+.field-err:empty { display: none; }
+[aria-invalid="true"] { border-color: var(--bad); }

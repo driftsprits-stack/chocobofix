@@ -11,7 +11,7 @@
   "soft_scores": {
     "overrun_days_total": 0,
     "contracts_overrunning": 0,
-    "earliness_days_total": 28,
+    "earliness_days_total": 21,
     "excess_access_nights_total": 0,
     "eclo_nights_total": 6,
     "priority_overrun": {"1": 0, "2": 0, "3": 0},
@@ -19,5 +19,5 @@
     "objective_score": 30.0,
     "formula_version": "PS1-README@966c976"
   },
-  "detail": {"nights_scheduled": 189, "eclo_nights": 6, "capacity_hotspots": 140}
+  "detail": {"nights_scheduled": 189, "eclo_nights": 6, "capacity_hotspots": 145}
 }

@@ -24,6 +24,18 @@ jobs:
       - run: ./build/test_core
       - run: ./build/test_store
       - run: ./tests/integration.sh build
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --prefix client
+      - run: npm --prefix client run build
+      - run: cd client && npx playwright install --with-deps chromium
+      - run: npm --prefix client run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: browser-results
+          path: client/test-results/
 
   macos:
     runs-on: macos-15
@@ -36,3 +48,21 @@ jobs:
       - run: ./build/test_core
       - run: ./build/test_store
       - run: ./tests/integration.sh build
+
+  frontend:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - run: npm ci --prefix client
+      - run: npm --prefix client run check
+      - run: npm --prefix client audit --audit-level=moderate
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-coverage
+          path: client/coverage/
