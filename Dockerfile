@@ -6,7 +6,7 @@ RUN npm ci --no-audit --no-fund
 COPY client/ ./
 RUN npm run build
 
-FROM ubuntu:24.04 AS build
+FROM ubuntu:26.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential cmake curl ca-certificates libsqlite3-dev libssl-dev \
@@ -22,7 +22,7 @@ RUN ./scripts/fetch_deps.sh \
  && mkdir -p /runtime/lib \
  && cp -a /src/third_party/or-tools_*/lib/. /runtime/lib/
 
-FROM ubuntu:24.04
+FROM ubuntu:26.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsqlite3-0 libssl3t64 ca-certificates \
